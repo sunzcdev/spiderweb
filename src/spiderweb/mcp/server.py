@@ -9,6 +9,8 @@ from mcp.types import Tool, TextContent
 
 from ..engine.db import get_db, get_db_path
 from ..engine.domain import load_domain, DomainConfig
+from ..engine.l1.ingest import ingest_file
+from ..engine.l2.build import build_graph
 
 server = Server("spiderweb")
 _config: DomainConfig = None
@@ -40,6 +42,9 @@ async def list_tools():
         Tool(name="relation_set", description="Create or update a relation between two entities", inputSchema={"type": "object", "properties": {"entity_a": {"type": "string"}, "entity_b": {"type": "string"}, "relation_type": {"type": "string"}, "weight": {"type": "number", "default": 1.0}}}),
         Tool(name="relation_list", description="List all relations for an entity", inputSchema={"type": "object", "properties": {"entity_name": {"type": "string"}}}),
         Tool(name="graph_navigate", description="Navigate from an entity: single-step expansion, returns anchored and exploration edges", inputSchema={"type": "object", "properties": {"seed": {"type": "string", "description": "Starting entity name"}, "mode": {"type": "string", "enum": ["explore", "focus"], "default": "explore"}}}),
+        Tool(name="doc_ingest", description="Ingest a document into L1: accepts .md, .txt, .epub files", inputSchema={"type": "object", "properties": {"file_path": {"type": "string", "description": "Absolute path to the document file"}, "title": {"type": "string", "description": "Optional title override"}, "author": {"type": "string", "description": "Optional author"}}}),
+        Tool(name="graph_build", description="Build/extend the knowledge graph by extracting entities and relations from ingested documents using LLM", inputSchema={"type": "object", "properties": {"doc_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional list of doc IDs to process. If empty, processes all docs."}}}),
+        Tool(name="entity_register", description="Manually register an entity in the knowledge graph", inputSchema={"type": "object", "properties": {"name": {"type": "string", "description": "Canonical entity name"}, "entity_type": {"type": "string", "description": "Entity type"}, "aliases": {"type": "array", "items": {"type": "string"}, "description": "Optional aliases"}, "description": {"type": "string", "description": "Optional description"}}}),
         Tool(name="insight_record", description="Record an insight/note with optional source docs and entities", inputSchema={"type": "object", "properties": {"title": {"type": "string"}, "content": {"type": "string"}, "source_docs": {"type": "array", "items": {"type": "string"}, "description": "Optional list of doc titles"}}}),
         Tool(name="insight_list", description="List recent insights", inputSchema={"type": "object", "properties": {"limit": {"type": "integer", "default": 20}}}),
     ]
@@ -60,10 +65,16 @@ async def call_tool(name: str, arguments: dict):
             return await _search_entities(db, arguments)
         elif name == "search_insights":
             return await _search_insights(db, arguments)
+        elif name == "doc_ingest":
+            return await _doc_ingest(db, config, arguments)
         elif name == "doc_get":
             return await _doc_get(db, arguments)
+        elif name == "graph_build":
+            return await _graph_build(db, config, arguments)
         elif name == "entity_get":
             return await _entity_get(db, arguments)
+        elif name == "entity_register":
+            return await _entity_register(db, arguments)
         elif name == "relation_set":
             return await _relation_set(db, arguments)
         elif name == "relation_list":
@@ -81,6 +92,81 @@ async def call_tool(name: str, arguments: dict):
 
 
 # === Tool implementations ===
+
+async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
+    file_path = os.path.expanduser(args["file_path"])
+    title_override = args.get("title", "")
+    author_override = args.get("author", "")
+
+    title, author, chunks = ingest_file(
+        file_path,
+        chunk_size=config.chunk_size,
+        chunk_overlap=config.chunk_overlap,
+    )
+
+    if title_override:
+        title = title_override
+    if author_override:
+        author = author_override
+
+    # Insert doc
+    cursor = db.execute(
+        "INSERT INTO docs (path, title, author) VALUES (?, ?, ?)",
+        (file_path, title, author)
+    )
+    doc_id = cursor.lastrowid
+
+    # Insert chunks
+    chunk_count = 0
+    for ch in chunks:
+        cid = db.execute(
+            "INSERT INTO chunks (doc_id, section_path, heading_level, body, line_start) VALUES (?, ?, ?, ?, ?)",
+            (doc_id, ch.section_path, ch.heading_level, ch.body, ch.line_start)
+        ).lastrowid
+        # Sync FTS5 with matching rowid
+        db.execute(
+            "INSERT INTO chunks_fts(rowid, body) VALUES (?, ?)",
+            (cid, ch.body)
+        )
+        chunk_count += 1
+
+    db.commit()
+
+    return [TextContent(type="text", text=_json_result({
+        "ok": True,
+        "doc_id": doc_id,
+        "title": title,
+        "author": author,
+        "chunks": chunk_count,
+    }))]
+
+
+async def _graph_build(db, config: DomainConfig, args) -> list[TextContent]:
+    doc_ids = args.get("doc_ids", [])
+    result = await build_graph(db, config, doc_ids=doc_ids if doc_ids else None)
+    return [TextContent(type="text", text=_json_result(result))]
+
+
+async def _entity_register(db, args) -> list[TextContent]:
+    name = args["name"].strip()
+    etype = args.get("entity_type", "concept")
+    aliases = json.dumps(args.get("aliases", []), ensure_ascii=False)
+    description = args.get("description", "")
+
+    existing = db.execute("SELECT id FROM entities WHERE canonical_name = ?", (name,)).fetchone()
+    if existing:
+        db.execute(
+            "UPDATE entities SET entity_type = ?, aliases_json = ?, description = ? WHERE canonical_name = ?",
+            (etype, aliases, description, name)
+        )
+    else:
+        db.execute(
+            "INSERT INTO entities (canonical_name, entity_type, aliases_json, description, source) VALUES (?, ?, ?, ?, 'manual')",
+            (name, etype, aliases, description)
+        )
+    db.commit()
+    return [TextContent(type="text", text=_json_result({"ok": True, "name": name, "type": etype}))]
+
 
 async def _graph_stats(db) -> list[TextContent]:
     stats = {}
