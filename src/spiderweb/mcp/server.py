@@ -11,7 +11,8 @@ from ..engine.db import get_db, get_db_path
 from ..engine.domain import load_domain, DomainConfig
 from ..engine.l1.ingest import ingest_file, index_vectors, hybrid_search
 from ..engine.l2.build import build_graph
-from ..engine.providers import create_embedding_provider
+from ..engine.l3.insight import reverse_extract, link_insight_to_entities
+from ..engine.providers import create_llm_provider, create_embedding_provider
 
 server = Server("spiderweb")
 _config: DomainConfig = None
@@ -83,7 +84,7 @@ async def call_tool(name: str, arguments: dict):
         elif name == "graph_navigate":
             return await _graph_navigate(db, config, arguments)
         elif name == "insight_record":
-            return await _insight_record(db, arguments)
+            return await _insight_record(db, config, arguments)
         elif name == "insight_list":
             return await _insight_list(db, arguments)
         else:
@@ -362,20 +363,36 @@ async def _graph_navigate(db, config: DomainConfig, args) -> list[TextContent]:
     }))]
 
 
-async def _insight_record(db, args) -> list[TextContent]:
+async def _insight_record(db, config: DomainConfig, args) -> list[TextContent]:
     import re
     title = args["title"]
     content = args["content"]
     source_docs = args.get("source_docs", [])
     slug = re.sub(r'[^a-z0-9一-鿿]+', '-', title.lower().strip())[:80]
 
-    db.execute(
+    cursor = db.execute(
         "INSERT OR REPLACE INTO insights (slug, title, content, source_docs_json, updated_at) "
         "VALUES (?, ?, ?, ?, datetime('now'))",
         (slug, title, content, json.dumps(source_docs, ensure_ascii=False))
     )
+    insight_id = cursor.lastrowid
+
+    # Reverse extract entities and link to L2
+    link_result = {}
+    try:
+        llm = create_llm_provider(config.llm)
+        entities, relations = await reverse_extract(llm, config, content)
+        link_result = link_insight_to_entities(db, config, insight_id, entities, relations)
+    except Exception as e:
+        link_result = {"error": str(e)}
+
     db.commit()
-    return [TextContent(type="text", text=_json_result({"ok": True, "slug": slug}))]
+    return [TextContent(type="text", text=_json_result({
+        "ok": True,
+        "slug": slug,
+        "insight_id": insight_id,
+        "linked": link_result,
+    }))]
 
 
 async def _insight_list(db, args) -> list[TextContent]:
