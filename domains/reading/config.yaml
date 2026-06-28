@@ -1,26 +1,17 @@
-# Spiderweb - Reading Domain Configuration
-
-data_dir: ~/.spiderweb/reading
-
-chunk_size: 1500
 chunk_overlap: 150
-
+chunk_size: 1500
+data_dir: ~/.spiderweb/reading
 extraction:
-  mode: sample       # full | sample
-  sample_rate: 0.3   # fraction of chunks to extract from
-
+  mode: sample
+  sample_rate: 0.3
 providers:
-  llm:
-    driver: openai
-    model: deepseek-chat
-    base_url: https://api.deepseek.com/v1
-    # api_key: from SPIDERWEB_LLM_API_KEY env var
   embedding:
+    dimensions: 1024
     driver: voyage
     model: voyage-4-large
-    dimensions: 1024
-    # api_key: from SPIDERWEB_EMBEDDING_API_KEY env var
+  llm:
+    base_url: https://api.deepseek.com/v1
+    driver: openai
+    model: deepseek-chat
   tokenizer:
     driver: jieba
-    # Optional: Chinese word segmentation for FTS5
-    # Remove or set driver: none for English-only

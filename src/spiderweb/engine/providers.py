@@ -1,7 +1,7 @@
 """Provider interfaces — LLM, embedding, tokenizer, reranker."""
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -17,6 +17,12 @@ class EmbeddingProvider(ABC):
     @property
     @abstractmethod
     def dimensions(self) -> int: ...
+
+
+class TokenizerProvider(ABC):
+    """Tokenizes text into space-separated tokens for FTS5 indexing."""
+    @abstractmethod
+    def tokenize(self, text: str) -> str: ...
 
 
 @dataclass
@@ -76,6 +82,36 @@ def create_llm_provider(config: dict) -> LLMProvider:
             base_url=config.get("base_url", "https://api.deepseek.com/v1"),
         )
     raise ValueError(f"Unknown LLM driver: {driver}")
+
+
+@dataclass
+class JiebaTokenizer(TokenizerProvider):
+    """Chinese word segmentation via jieba (pure Python)."""
+    dict_path: str = ""
+    _initialized: bool = field(default=False, init=False)
+
+    def _init(self):
+        if self._initialized:
+            return
+        import jieba
+        self._jieba = jieba
+        if self.dict_path and os.path.exists(self.dict_path):
+            jieba.set_dictionary(self.dict_path)
+        self._initialized = True
+
+    def tokenize(self, text: str) -> str:
+        self._init()
+        tokens = self._jieba.cut(text.strip())
+        return " ".join(t for t in tokens if t.strip())
+
+
+def create_tokenizer_provider(config: dict) -> TokenizerProvider | None:
+    driver = config.get("driver", "").lower()
+    if not driver or driver == "none":
+        return None
+    if driver == "jieba":
+        return JiebaTokenizer(dict_path=config.get("dict_path", ""))
+    raise ValueError(f"Unknown tokenizer driver: {driver}")
 
 
 def create_embedding_provider(config: dict) -> EmbeddingProvider | None:

@@ -200,9 +200,33 @@ async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int]) -
     return count
 
 
-def hybrid_search(db, query: str, query_vec: list[float] | None, top_n: int = 5) -> list[dict]:
-    """Hybrid search: LIKE + vector (if available), dedup by chunk_id."""
-    # LIKE results
+def hybrid_search(db, query: str, query_vec: list[float] | None, top_n: int = 5,
+                  tokenizer=None) -> list[dict]:
+    """Hybrid search: FTS5 (or LIKE) + vector (if available), dedup by chunk_id."""
+    results = []
+    seen = set()
+
+    # Text search: combine FTS5 (word-level precision) + LIKE (substring recall)
+    fts_rows = []
+    like_rows = []
+
+    if tokenizer:
+        tokenized_query = tokenizer.tokenize(query)
+        tokens = tokenized_query.split()
+        fts_query = " ".join(f"{t}*" for t in tokens)
+        try:
+            fts_rows = db.execute(
+                "SELECT c.id, c.doc_id, c.section_path, c.body, d.title "
+                "FROM chunks_fts f JOIN chunks c ON f.rowid = c.id "
+                "JOIN docs d ON c.doc_id = d.id "
+                "WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+                (fts_query, top_n * 3)
+            ).fetchall()
+        except Exception:
+            pass
+
+    # LIKE always runs as fallback/recall layer — catches substring matches
+    # that tokenizer misses (e.g., compound words split across tokens)
     like_rows = db.execute(
         "SELECT c.id, c.doc_id, c.section_path, c.body, d.title "
         "FROM chunks c JOIN docs d ON c.doc_id = d.id "
@@ -210,10 +234,10 @@ def hybrid_search(db, query: str, query_vec: list[float] | None, top_n: int = 5)
         (f"%{query}%", top_n * 3)
     ).fetchall()
 
-    results = []
-    seen = set()
+    # Merge: FTS5 first (higher precision), then LIKE (recall)
+    text_rows = list(fts_rows) + [r for r in like_rows if r[0] not in {row[0] for row in fts_rows}]
 
-    for r in like_rows:
+    for r in text_rows:
         cid = r[0]
         if cid not in seen:
             seen.add(cid)

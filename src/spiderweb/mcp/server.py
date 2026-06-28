@@ -12,7 +12,7 @@ from ..engine.domain import load_domain, DomainConfig
 from ..engine.l1.ingest import ingest_file, index_vectors, hybrid_search
 from ..engine.l2.build import build_graph
 from ..engine.l3.insight import reverse_extract, link_insight_to_entities
-from ..engine.providers import create_llm_provider, create_embedding_provider
+from ..engine.providers import create_llm_provider, create_embedding_provider, create_tokenizer_provider
 
 server = Server("spiderweb")
 _config: DomainConfig = None
@@ -122,15 +122,17 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
     # Insert chunks
     chunk_count = 0
     chunk_ids = []
+    tokenizer = create_tokenizer_provider(config.tokenizer)
     for ch in chunks:
         cid = db.execute(
             "INSERT INTO chunks (doc_id, section_path, heading_level, body, line_start) VALUES (?, ?, ?, ?, ?)",
             (doc_id, ch.section_path, ch.heading_level, ch.body, ch.line_start)
         ).lastrowid
-        # Sync FTS5 with matching rowid
+        # FTS5: use tokenized text if tokenizer available (Chinese word segmentation)
+        fts_body = tokenizer.tokenize(ch.body) if tokenizer else ch.body
         db.execute(
             "INSERT INTO chunks_fts(rowid, body) VALUES (?, ?)",
-            (cid, ch.body)
+            (cid, fts_body)
         )
         chunk_ids.append(cid)
         chunk_count += 1
@@ -211,7 +213,8 @@ async def _search_chunks(db, args) -> list[TextContent]:
         except Exception:
             pass
 
-    results = hybrid_search(db, query, query_vec, top_n)
+    tokenizer = create_tokenizer_provider(config.tokenizer)
+    results = hybrid_search(db, query, query_vec, top_n, tokenizer)
     return [TextContent(type="text", text=_json_result({"results": results, "count": len(results)}))]
 
 
