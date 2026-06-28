@@ -26,6 +26,7 @@ class DomainConfig:
     llm: dict = field(default_factory=dict)
     embedding: dict = field(default_factory=dict)
     tokenizer: dict = field(default_factory=dict)
+    reranker: dict = field(default_factory=dict)
 
     # Paths
     prompts_dir: str = ""
@@ -67,6 +68,7 @@ def load_domain(domain_path: str) -> DomainConfig:
         config.llm = raw.get("providers", {}).get("llm", {})
         config.embedding = raw.get("providers", {}).get("embedding", {})
         config.tokenizer = raw.get("providers", {}).get("tokenizer", {})
+        config.reranker = raw.get("providers", {}).get("reranker", {})
     else:
         config.data_dir = os.path.expanduser(f"~/.spiderweb/{config.name}")
 

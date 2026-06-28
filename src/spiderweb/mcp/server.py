@@ -12,7 +12,7 @@ from ..engine.domain import load_domain, DomainConfig
 from ..engine.l1.ingest import ingest_file, index_vectors, hybrid_search
 from ..engine.l2.build import build_graph
 from ..engine.l3.insight import reverse_extract, link_insight_to_entities
-from ..engine.providers import create_llm_provider, create_embedding_provider, create_tokenizer_provider
+from ..engine.providers import create_llm_provider, create_embedding_provider, create_tokenizer_provider, create_reranker_provider
 
 server = Server("spiderweb")
 _config: DomainConfig = None
@@ -214,7 +214,8 @@ async def _search_chunks(db, args) -> list[TextContent]:
             pass
 
     tokenizer = create_tokenizer_provider(config.tokenizer)
-    results = hybrid_search(db, query, query_vec, top_n, tokenizer)
+    reranker = create_reranker_provider(config.reranker)
+    results = await hybrid_search(db, query, query_vec, top_n, tokenizer, reranker)
     return [TextContent(type="text", text=_json_result({"results": results, "count": len(results)}))]
 
 

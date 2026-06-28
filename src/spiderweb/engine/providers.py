@@ -25,6 +25,12 @@ class TokenizerProvider(ABC):
     def tokenize(self, text: str) -> str: ...
 
 
+class RerankerProvider(ABC):
+    """Re-ranks search results by relevance to query."""
+    @abstractmethod
+    async def rerank(self, query: str, documents: list[str], top_n: int) -> list[tuple[int, float]]: ...
+
+
 @dataclass
 class OpenAILLM(LLMProvider):
     model: str = "deepseek-chat"
@@ -112,6 +118,28 @@ def create_tokenizer_provider(config: dict) -> TokenizerProvider | None:
     if driver == "jieba":
         return JiebaTokenizer(dict_path=config.get("dict_path", ""))
     raise ValueError(f"Unknown tokenizer driver: {driver}")
+
+
+@dataclass
+class VoyageReranker(RerankerProvider):
+    model: str = "rerank-2-lite"
+    api_key: str = ""
+
+    async def rerank(self, query: str, documents: list[str], top_n: int) -> list[tuple[int, float]]:
+        import voyageai
+        key = self.api_key or os.environ.get("SPIDERWEB_EMBEDDING_API_KEY", "") or os.environ.get("VOYAGE_API_KEY", "")
+        vo = voyageai.Client(api_key=key)
+        result = vo.rerank(query=query, documents=documents, model=self.model, top_k=top_n)
+        return [(r.index, r.relevance_score) for r in result.results]
+
+
+def create_reranker_provider(config: dict) -> RerankerProvider | None:
+    driver = config.get("driver", "").lower()
+    if not driver or driver == "none":
+        return None
+    if driver == "voyage":
+        return VoyageReranker(model=config.get("model", "rerank-2-lite"))
+    raise ValueError(f"Unknown reranker driver: {driver}")
 
 
 def create_embedding_provider(config: dict) -> EmbeddingProvider | None:

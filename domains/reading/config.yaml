@@ -13,5 +13,8 @@ providers:
     base_url: https://api.deepseek.com/v1
     driver: openai
     model: deepseek-chat
+  reranker:
+    driver: voyage
+    model: rerank-2-lite
   tokenizer:
     driver: jieba

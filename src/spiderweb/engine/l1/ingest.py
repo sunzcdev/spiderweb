@@ -200,9 +200,9 @@ async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int]) -
     return count
 
 
-def hybrid_search(db, query: str, query_vec: list[float] | None, top_n: int = 5,
-                  tokenizer=None) -> list[dict]:
-    """Hybrid search: FTS5 (or LIKE) + vector (if available), dedup by chunk_id."""
+async def hybrid_search(db, query: str, query_vec: list[float] | None, top_n: int = 5,
+                  tokenizer=None, reranker=None) -> list[dict]:
+    """Hybrid search: FTS5 + LIKE + vector → dedup → rerank → top_n."""
     results = []
     seen = set()
 
@@ -267,5 +267,19 @@ def hybrid_search(db, query: str, query_vec: list[float] | None, top_n: int = 5,
                         "chunk_id": cid, "doc_id": r[1], "section": r[2],
                         "body": r[3][:500], "doc_title": r[4], "source": "vector"
                     })
+
+    # Rerank: re-score merged results by relevance (if reranker configured)
+    if reranker and len(results) > 1:
+        try:
+            docs = [r["body"] for r in results]
+            scored = await reranker.rerank(query, docs, min(top_n, len(docs)))
+            # Reorder by reranker score
+            reranked = [results[i] for i, _ in scored if i < len(results)]
+            # Append any results the reranker didn't score
+            scored_indices = {i for i, _ in scored}
+            reranked += [r for j, r in enumerate(results) if j not in scored_indices]
+            results = reranked
+        except Exception:
+            pass  # Rerank failure → keep original order
 
     return results[:top_n]
