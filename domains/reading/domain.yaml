@@ -1,0 +1,102 @@
+name: reading
+version: "1.0"
+
+entity_types:
+  person:
+    label: "人物"
+    subtypes:
+      ruler: { label: "统治者" }
+      philosopher: { label: "哲学家" }
+      character: { label: "虚构角色" }
+      author: { label: "作者" }
+  work:
+    label: "著作"
+    subtypes:
+      classic: { label: "经典" }
+      commentary: { label: "注疏" }
+      novel: { label: "小说" }
+  concept:
+    label: "概念"
+    subtypes:
+      school: { label: "学派" }
+      doctrine: { label: "学说" }
+      pattern: { label: "模式" }
+      theory: { label: "理论" }
+  event:
+    label: "事件"
+    subtypes:
+      battle: { label: "战役" }
+      era: { label: "时代" }
+  location:
+    label: "地点"
+
+relation_types:
+  AUTHORED:
+    label: "创作"
+    weight: 10
+    valid_triplets:
+      - [person, AUTHORED, work]
+  INFLUENCED_BY:
+    label: "影响"
+    weight: 5
+    valid_triplets:
+      - [person, INFLUENCED_BY, person]
+      - [work, INFLUENCED_BY, work]
+      - [concept, INFLUENCED_BY, concept]
+  DERIVES_FROM:
+    label: "源自"
+    weight: 5
+    valid_triplets:
+      - [concept, DERIVES_FROM, concept]
+      - [work, DERIVES_FROM, work]
+  CONTRADICTS:
+    label: "对立"
+    weight: 5
+    valid_triplets:
+      - [concept, CONTRADICTS, concept]
+      - [person, CONTRADICTS, person]
+  PARTICIPATED_IN:
+    label: "参与"
+    weight: 5
+    valid_triplets:
+      - [person, PARTICIPATED_IN, event]
+  LOCATED_IN:
+    label: "位于"
+    weight: 3
+    valid_triplets:
+      - [person, LOCATED_IN, location]
+      - [event, LOCATED_IN, location]
+      - [work, LOCATED_IN, location]
+  KNOWS:
+    label: "认识"
+    weight: 3
+    valid_triplets:
+      - [person, KNOWS, person]
+  BELONGS_TO:
+    label: "属于"
+    weight: 3
+    valid_triplets:
+      - [concept, BELONGS_TO, concept.school]
+      - [person, BELONGS_TO, concept.school]
+      - [work, BELONGS_TO, concept.school]
+  PRECEDES:
+    label: "先于"
+    weight: 2
+    valid_triplets:
+      - [event, PRECEDES, event]
+      - [person, PRECEDES, person]
+  MENTIONS:
+    label: "提及"
+    weight: 1
+    valid_triplets: []  # any type pair allowed
+
+doc_meta_schema:
+  title: { type: str, required: true }
+  author: { type: str, required: false }
+  translator: { type: str, required: false }
+  year: { type: int, required: false }
+
+entity_description_template: |
+  基于以下来自"{doc_title}"的段落，用一句话概括实体"{entity_name}"（类型：{entity_type}）：
+  {context}
+  只输出描述，不要前缀。
