@@ -47,7 +47,7 @@ class VoyageEmbedding(EmbeddingProvider):
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         import voyageai
-        key = self.api_key or os.environ.get("SPIDERWEB_EMBEDDING_API_KEY", "")
+        key = self.api_key or os.environ.get("SPIDERWEB_EMBEDDING_API_KEY", "") or os.environ.get("VOYAGE_API_KEY", "")
         vo = voyageai.Client(api_key=key)
         result = vo.embed(texts, model=self.model, input_type="document")
         return result.embeddings
@@ -55,6 +55,17 @@ class VoyageEmbedding(EmbeddingProvider):
     @property
     def dimensions(self) -> int:
         return self._dimensions
+
+
+@dataclass
+class NoopEmbedding(EmbeddingProvider):
+    """No-op provider when embedding is disabled."""
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return []
+
+    @property
+    def dimensions(self) -> int:
+        return 0
 
 
 def create_llm_provider(config: dict) -> LLMProvider:

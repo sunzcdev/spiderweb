@@ -9,8 +9,9 @@ from mcp.types import Tool, TextContent
 
 from ..engine.db import get_db, get_db_path
 from ..engine.domain import load_domain, DomainConfig
-from ..engine.l1.ingest import ingest_file
+from ..engine.l1.ingest import ingest_file, index_vectors, hybrid_search
 from ..engine.l2.build import build_graph
+from ..engine.providers import create_embedding_provider
 
 server = Server("spiderweb")
 _config: DomainConfig = None
@@ -118,6 +119,7 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
 
     # Insert chunks
     chunk_count = 0
+    chunk_ids = []
     for ch in chunks:
         cid = db.execute(
             "INSERT INTO chunks (doc_id, section_path, heading_level, body, line_start) VALUES (?, ?, ?, ?, ?)",
@@ -128,7 +130,18 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
             "INSERT INTO chunks_fts(rowid, body) VALUES (?, ?)",
             (cid, ch.body)
         )
+        chunk_ids.append(cid)
         chunk_count += 1
+
+    # Vector indexing (if embedding provider configured)
+    vec_count = 0
+    emb_provider = create_embedding_provider(config.embedding)
+    if emb_provider:
+        try:
+            vec_count = await index_vectors(db, emb_provider, chunk_ids)
+        except Exception as e:
+            # Vector indexing failure is non-fatal — doc ingested, just no vectors
+            pass
 
     db.commit()
 
@@ -138,6 +151,7 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
         "title": title,
         "author": author,
         "chunks": chunk_count,
+        "vectors": vec_count,
     }))]
 
 
@@ -183,16 +197,19 @@ async def _graph_stats(db) -> list[TextContent]:
 async def _search_chunks(db, args) -> list[TextContent]:
     query = args["query"]
     top_n = args.get("top_n", 5)
-    # ponytail: LIKE-based search for MVP; upgrade path to FTS5+vector
-    # when embedding provider is configured (config.embedding.driver != none)
-    rows = db.execute(
-        "SELECT c.id, c.doc_id, c.section_path, c.body, d.title "
-        "FROM chunks c JOIN docs d ON c.doc_id = d.id "
-        "WHERE c.body LIKE ? ORDER BY c.id LIMIT ?",
-        (f"%{query}%", top_n)
-    ).fetchall()
-    results = [{"chunk_id": r[0], "doc_id": r[1], "section": r[2],
-                "body": r[3][:500], "doc_title": r[4]} for r in rows]
+    config = get_config()
+
+    # Get query embedding if provider configured
+    query_vec = None
+    emb_provider = create_embedding_provider(config.embedding)
+    if emb_provider:
+        try:
+            vecs = await emb_provider.embed([query])
+            query_vec = vecs[0] if vecs else None
+        except Exception:
+            pass
+
+    results = hybrid_search(db, query, query_vec, top_n)
     return [TextContent(type="text", text=_json_result({"results": results, "count": len(results)}))]
 
 

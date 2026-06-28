@@ -1,10 +1,11 @@
-"""Document ingestion — parse, chunk, store."""
+"""Document ingestion — parse, chunk, store, vectorize."""
+import json
 import os
 import re
 import subprocess
-import tempfile
 from pathlib import Path
 from dataclasses import dataclass
+from ..providers import EmbeddingProvider
 
 
 @dataclass
@@ -131,3 +132,107 @@ def _epub_to_markdown(file_path: str) -> str:
                 text = re.sub(r"\s+", " ", text).strip()
                 return text
     return ""
+
+
+# === Vector indexing ===
+
+def ensure_vec_table(db, dimensions: int):
+    """Create vec0 table if it doesn't exist. Must match stored dimensions."""
+    # sqlite_vec already loaded by get_db()
+    existing = db.execute("SELECT value FROM _meta WHERE key = 'embedding_dimensions'").fetchone()
+    if existing:
+        stored_dim = int(existing[0])
+        if stored_dim != dimensions:
+            raise ValueError(
+                f"Embedding dimensions mismatch: stored {stored_dim}, configured {dimensions}. "
+                "Cannot change embedding model after graph creation."
+            )
+        return  # Already initialized
+
+    db.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[{dimensions}])")
+    db.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES ('embedding_dimensions', ?)", (str(dimensions),))
+    db.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES ('has_vectors', '1')")
+    db.commit()
+
+
+async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int]) -> int:
+    """Embed chunks and insert into chunks_vec. Returns count indexed."""
+    if not chunk_ids:
+        return 0
+
+    ensure_vec_table(db, provider.dimensions)
+    count = 0
+
+    # Process in batches
+    batch_size = 32
+    for i in range(0, len(chunk_ids), batch_size):
+        batch = chunk_ids[i:i + batch_size]
+        rows = db.execute(
+            f"SELECT id, body FROM chunks WHERE id IN ({','.join('?' * len(batch))})",
+            batch
+        ).fetchall()
+
+        texts = [r[1] for r in rows]
+        ids = [r[0] for r in rows]
+
+        try:
+            embeddings = await provider.embed(texts)
+        except Exception as e:
+            raise RuntimeError(f"Embedding failed: {e}") from e
+
+        for chunk_id, vec in zip(ids, embeddings):
+            db.execute(
+                "INSERT OR REPLACE INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
+                (chunk_id, json.dumps(vec))
+            )
+            count += 1
+
+    db.commit()
+    return count
+
+
+def hybrid_search(db, query: str, query_vec: list[float] | None, top_n: int = 5) -> list[dict]:
+    """Hybrid search: LIKE + vector (if available), dedup by chunk_id."""
+    # LIKE results
+    like_rows = db.execute(
+        "SELECT c.id, c.doc_id, c.section_path, c.body, d.title "
+        "FROM chunks c JOIN docs d ON c.doc_id = d.id "
+        "WHERE c.body LIKE ? ORDER BY c.id LIMIT ?",
+        (f"%{query}%", top_n * 3)
+    ).fetchall()
+
+    results = []
+    seen = set()
+
+    for r in like_rows:
+        cid = r[0]
+        if cid not in seen:
+            seen.add(cid)
+            results.append({
+                "chunk_id": cid, "doc_id": r[1], "section": r[2],
+                "body": r[3][:500], "doc_title": r[4], "source": "text"
+            })
+
+    # Vector results (if available)
+    if query_vec and len(query_vec) > 0:
+        has_vec = db.execute("SELECT value FROM _meta WHERE key = 'has_vectors'").fetchone()
+        if has_vec and has_vec[0] == '1':
+            vec_rows = db.execute(
+                "SELECT c.id, c.doc_id, c.section_path, c.body, d.title, v.distance "
+                "FROM chunks_vec v "
+                "JOIN chunks c ON v.rowid = c.id "
+                "JOIN docs d ON c.doc_id = d.id "
+                "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
+                (json.dumps(query_vec), top_n * 2)
+            ).fetchall()
+
+            for r in vec_rows:
+                cid = r[0]
+                if cid not in seen:
+                    seen.add(cid)
+                    results.append({
+                        "chunk_id": cid, "doc_id": r[1], "section": r[2],
+                        "body": r[3][:500], "doc_title": r[4], "source": "vector"
+                    })
+
+    return results[:top_n]
