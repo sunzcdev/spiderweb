@@ -3,6 +3,7 @@ import json
 import re
 from ..providers import LLMProvider
 from ..domain import DomainConfig, get_entity_types_flat
+from ..hooks import run_validators
 
 EXTRACT_SYSTEM = """You extract structured knowledge from text. Output ONLY valid JSON.
 
@@ -146,10 +147,21 @@ def _validate_triplet(a: str, b: str, rtype: str, config: DomainConfig, valid_na
     a_type = entities.get(a, {}).get("type", "").split(".")[0]  # base type
     b_type = entities.get(b, {}).get("type", "").split(".")[0]
 
+    # Static schema check
+    schema_ok = False
     for s, _, o in triplets:
         if (s == a_type or s == a_type.split(".")[0]) and (o == b_type or o == b_type.split(".")[0]):
-            return True
-    return False
+            schema_ok = True
+            break
+    if not schema_ok:
+        return False
+
+    # Custom validators from hooks
+    ctx = {"entity_a": a, "entity_b": b, "entities": entities}
+    if not run_validators(config.hooks_module, a_type, rtype, b_type, ctx):
+        return False
+
+    return True
 
 
 def _parse_json(text: str) -> dict | None:

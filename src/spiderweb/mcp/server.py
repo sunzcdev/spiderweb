@@ -104,6 +104,7 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
         file_path,
         chunk_size=config.chunk_size,
         chunk_overlap=config.chunk_overlap,
+        hooks_module=config.hooks_module,
     )
 
     if title_override:

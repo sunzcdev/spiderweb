@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from dataclasses import dataclass
 from ..providers import EmbeddingProvider
+from ..hooks import run_pre_ingest
 
 
 @dataclass
@@ -16,7 +17,8 @@ class Chunk:
     line_start: int
 
 
-def ingest_file(file_path: str, chunk_size: int = 1500, chunk_overlap: int = 150) -> tuple[str, str, list[Chunk]]:
+def ingest_file(file_path: str, chunk_size: int = 1500, chunk_overlap: int = 150,
+                hooks_module=None) -> tuple[str, str, list[Chunk]]:
     """Ingest a file, return (title, author, list of Chunks). Supports .md, .txt, .epub."""
     path = Path(file_path)
     suffix = path.suffix.lower()
@@ -25,19 +27,26 @@ def ingest_file(file_path: str, chunk_size: int = 1500, chunk_overlap: int = 150
         text = _epub_to_markdown(str(path))
         title = _extract_title(text) or path.stem
         author = ""
-        chunks = _chunk_markdown(text)
     elif suffix == ".md":
         text = path.read_text(encoding="utf-8")
         title = _extract_title(text) or path.stem
         author = ""
-        chunks = _chunk_markdown(text)
     elif suffix == ".txt":
         text = path.read_text(encoding="utf-8")
         title = path.stem
         author = ""
-        chunks = _chunk_sliding_window(text, chunk_size, chunk_overlap)
     else:
         raise ValueError(f"Unsupported file type: {suffix}")
+
+    # Run pre_ingest hooks (chainable: each transforms text)
+    meta = {"file_path": file_path, "title": title, "author": author}
+    text = run_pre_ingest(hooks_module, text, meta)
+
+    # Chunk after hooks (hooks may alter content)
+    if suffix in (".epub", ".md"):
+        chunks = _chunk_markdown(text)
+    else:
+        chunks = _chunk_sliding_window(text, chunk_size, chunk_overlap)
 
     return title, author, chunks
 

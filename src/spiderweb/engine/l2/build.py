@@ -4,6 +4,7 @@ import math
 
 from ..providers import LLMProvider, create_llm_provider
 from ..domain import DomainConfig
+from ..hooks import run_post_extract
 
 
 def sample_chunks(db, doc_ids: list[int], mode: str, sample_rate: float) -> list[tuple[int, str]]:
@@ -53,6 +54,11 @@ async def build_graph(
 
     from .extract import extract_from_chunks
     entities, relations = await extract_from_chunks(llm, config, chunks, batch_size)
+
+    # Run post_extract hooks (chainable: rule engines, custom enhancers)
+    entities, relations = run_post_extract(
+        config.hooks_module, entities, relations, str(doc_ids or [])
+    )
 
     # Write entities
     registered = 0
