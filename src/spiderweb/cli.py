@@ -72,6 +72,32 @@ def cmd_serve(args):
     asyncio.run(mcp_main())
 
 
+def cmd_migrate_reading(args):
+    """Migrate reading-graph (old 读书郎) data into spiderweb."""
+    from .engine.db import get_db_path
+    from .migrate_reading import migrate
+
+    old_db = os.path.expanduser(args.old_db)
+    if not os.path.exists(old_db):
+        print(f"Old database not found: {old_db}")
+        sys.exit(1)
+
+    target = Path(args.target).expanduser().resolve() if args.target else Path.home() / ".spiderweb" / "reading"
+    new_db = get_db_path(str(target))
+    os.makedirs(os.path.dirname(new_db), exist_ok=True)
+
+    views_dir = args.views or os.path.join(os.path.dirname(old_db), "..", "views")
+
+    print(f"Migrating: {old_db} → {new_db}")
+    print(f"Views dir: {views_dir}")
+
+    stats = migrate(old_db, new_db, views_dir)
+
+    for key, val in stats.items():
+        print(f"  {key}: {val}")
+    print("Done.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Spiderweb — LLM-powered document graph engine")
     sub = parser.add_subparsers(dest="command")
@@ -89,6 +115,12 @@ def main():
     p_serve = sub.add_parser("serve", help="Start MCP stdio server")
     p_serve.add_argument("--domain", help="Domain pack directory (or set SPIDERWEB_DOMAIN)")
     p_serve.set_defaults(func=cmd_serve)
+
+    p_migrate = sub.add_parser("migrate-reading", help="Migrate reading-graph data into spiderweb")
+    p_migrate.add_argument("--old-db", required=True, help="Path to reading-graph doc_index.db")
+    p_migrate.add_argument("--target", help="Target spiderweb domain dir (default: ~/.spiderweb/reading)")
+    p_migrate.add_argument("--views", help="Path to views directory (default: auto-detect)")
+    p_migrate.set_defaults(func=cmd_migrate_reading)
 
     args = parser.parse_args()
     if not args.command:

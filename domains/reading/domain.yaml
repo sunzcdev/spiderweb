@@ -29,6 +29,13 @@ entity_types:
       era: { label: "时代" }
   location:
     label: "地点"
+  stem_branch:
+    label: "干支"
+    subtypes:
+      heavenly: { label: "天干" }
+      earthly: { label: "地支" }
+  element:
+    label: "五行"
 
 relation_types:
   AUTHORED:
@@ -89,6 +96,32 @@ relation_types:
     label: "提及"
     weight: 1
     valid_triplets: []  # any type pair allowed
+  RIVAL_OF:
+    label: "敌对"
+    weight: 5
+    valid_triplets:
+      - [person, RIVAL_OF, person]
+      - [concept, RIVAL_OF, concept]
+  ALLY_OF:
+    label: "同盟"
+    weight: 5
+    valid_triplets:
+      - [person, ALLY_OF, person]
+  HEAVENLY_COMBINES:
+    label: "天干合"
+    weight: 8
+    valid_triplets:
+      - [stem_branch.heavenly, HEAVENLY_COMBINES, stem_branch.heavenly]
+  EARTHLY_COMBINES:
+    label: "地支合"
+    weight: 8
+    valid_triplets:
+      - [stem_branch.earthly, EARTHLY_COMBINES, stem_branch.earthly]
+  EARTHLY_CLASHES:
+    label: "地支冲"
+    weight: 8
+    valid_triplets:
+      - [stem_branch.earthly, EARTHLY_CLASHES, stem_branch.earthly]
 
 doc_meta_schema:
   title: { type: str, required: true }
