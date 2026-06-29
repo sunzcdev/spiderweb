@@ -235,14 +235,38 @@ async def _search_entities(db, args) -> list[TextContent]:
 async def _search_insights(db, args) -> list[TextContent]:
     query = args["query"]
     top_n = args.get("top_n", 5)
-    rows = db.execute(
-        "SELECT i.id, i.slug, i.title, i.content, i.created_at FROM insights i "
-        "JOIN insights_fts f ON i.rowid = f.rowid "
-        "WHERE insights_fts MATCH ? ORDER BY rank LIMIT ?",
-        (query, top_n)
+    results = []
+    seen = set()
+
+    # FTS5 first (word-level precision with jieba if available)
+    try:
+        fts_rows = db.execute(
+            "SELECT i.id, i.slug, i.title, i.content, i.created_at FROM insights i "
+            "JOIN insights_fts f ON i.rowid = f.rowid "
+            "WHERE insights_fts MATCH ? ORDER BY rank LIMIT ?",
+            (query, top_n * 2)
+        ).fetchall()
+        for r in fts_rows:
+            if r[0] not in seen:
+                seen.add(r[0])
+                results.append({"id": r[0], "slug": r[1], "title": r[2],
+                               "content": r[3][:300], "created_at": r[4], "source": "fts"})
+    except Exception:
+        pass
+
+    # LIKE fallback for Chinese text (unicode61 doesn't segment CJK)
+    like_rows = db.execute(
+        "SELECT id, slug, title, content, created_at FROM insights "
+        "WHERE title LIKE ? OR content LIKE ? ORDER BY created_at DESC LIMIT ?",
+        (f"%{query}%", f"%{query}%", top_n * 2)
     ).fetchall()
-    results = [{"id": r[0], "slug": r[1], "title": r[2],
-                "content": r[3][:300], "created_at": r[4]} for r in rows]
+    for r in like_rows:
+        if r[0] not in seen:
+            seen.add(r[0])
+            results.append({"id": r[0], "slug": r[1], "title": r[2],
+                           "content": r[3][:300], "created_at": r[4], "source": "like"})
+
+    results = results[:top_n]
     _record_query_history(db, query, "search_insights", [{"slug": r["slug"], "title": r["title"]} for r in results[:5]])
     return [TextContent(type="text", text=_json_result({"results": results, "count": len(results)}))]
 
