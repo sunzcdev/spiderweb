@@ -26,7 +26,11 @@ def migrate(old_db_path: str, new_db_path: str, views_dir: str | None = None) ->
     stats["docs"] = _migrate_docs(old, new)
 
     # ── L1: chunks + FTS5 ─────────────────────────────
-    stats["chunks"] = _migrate_chunks(old, new)
+    chunk_map = {}  # (file_path, section_path) → (old_rowid, new_id)
+    stats["chunks"] = _migrate_chunks(old, new, chunk_map)
+
+    # ── L1: vectors ───────────────────────────────────
+    stats["vectors"] = _migrate_vectors(old, new, chunk_map, new_db_path)
 
     # ── L2: entities (aggregate aliases) ──────────────
     stats["entities"] = _migrate_entities(old, new)
@@ -101,9 +105,12 @@ def _migrate_docs(old, new) -> int:
     return count
 
 
-def _migrate_chunks(old, new) -> int:
-    """Map md_sections + section_meta → chunks + chunks_fts."""
+def _migrate_chunks(old, new, chunk_map: dict | None = None) -> int:
+    """Map md_sections + section_meta → chunks + chunks_fts.
+    Populates chunk_map: (file_path, section_path) → (old_rowid, new_id) for vector migration.
+    """
     count = 0
+    chunk_map = chunk_map if chunk_map is not None else {}
 
     # Build a lookup: (file_path, section_path) → (heading_level, line_start)
     meta_lookup = {}
@@ -115,11 +122,11 @@ def _migrate_chunks(old, new) -> int:
     # md_sections is an FTS5 virtual table with 'simple' tokenizer (libsimple) —
     # not loadable here. Read from underlying content table instead.
     rows = old.execute(
-        "SELECT c0, c1, c2 FROM md_sections_content "
+        "SELECT rowid, c0, c1, c2 FROM md_sections_content "
         "WHERE c0 LIKE '%/books/%' ORDER BY c0, id"
     ).fetchall()
 
-    for file_path, section_path, body in rows:
+    for old_rowid, file_path, section_path, body in rows:
         doc_row = new.execute("SELECT id FROM docs WHERE path = ?", (file_path,)).fetchone()
         if not doc_row:
             continue
@@ -137,7 +144,61 @@ def _migrate_chunks(old, new) -> int:
             "INSERT INTO chunks_fts(rowid, body) VALUES (?, ?)",
             (cid, body or "")
         )
+
+        # Track mapping for vector migration
+        chunk_map[(file_path, section_path)] = (old_rowid, cid)
         count += 1
+
+    new.commit()
+    return count
+
+
+def _migrate_vectors(old, new, chunk_map: dict, new_db_path: str) -> int:
+    """Migrate vec0 vectors from old vec_chunks to new chunks_vec."""
+    import sqlite_vec
+
+    # Load sqlite_vec in old connection to read the vec0 virtual table
+    old.enable_load_extension(True)
+    sqlite_vec.load(old)
+    old.enable_load_extension(False)
+
+    # Ensure vec table exists in new DB (1024-dim, same as old voyage-4-large)
+    from .engine.l1.ingest import ensure_vec_table
+    ensure_vec_table(new, 1024)
+
+    # Build reverse map: old_rowid → new_chunk_id
+    old_to_new = {}
+    for (fp, sp), (old_rid, new_id) in chunk_map.items():
+        old_to_new[old_rid] = new_id
+
+    # Read vectors from old vec_chunks and insert into new chunks_vec
+    count = 0
+    batch = []
+    BATCH_SIZE = 256
+
+    for row in old.execute("SELECT chunk_id, embedding FROM vec_chunks"):
+        old_id = row[0]
+        embedding_blob = row[1]
+        new_id = old_to_new.get(old_id)
+        if new_id is None:
+            continue
+
+        # vec0 embedding column stores raw float32 blob (1024 * 4 = 4096 bytes)
+        batch.append((new_id, embedding_blob))
+        count += 1
+
+        if len(batch) >= BATCH_SIZE:
+            new.executemany(
+                "INSERT OR REPLACE INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
+                batch
+            )
+            batch = []
+
+    if batch:
+        new.executemany(
+            "INSERT OR REPLACE INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
+            batch
+        )
 
     new.commit()
     return count
