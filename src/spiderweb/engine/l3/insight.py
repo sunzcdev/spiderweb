@@ -36,6 +36,8 @@ async def reverse_extract(
     content: str,
 ) -> tuple[list[dict], list[dict]]:
     """Extract entities and co-occurrence relations from an insight."""
+    from ..domain import load_prompt
+
     entity_types_str = ", ".join(sorted(get_entity_types_flat(config)))
 
     prompt = REVERSE_EXTRACT_USER.format(
@@ -43,10 +45,12 @@ async def reverse_extract(
         content=content,
     )
 
+    sys_prompt = load_prompt(config, "record_insight.md") or REVERSE_EXTRACT_SYSTEM
+
     for attempt in range(3):
         try:
             response = await llm.chat([
-                {"role": "system", "content": REVERSE_EXTRACT_SYSTEM},
+                {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": prompt},
             ])
             data = _parse_json(response)

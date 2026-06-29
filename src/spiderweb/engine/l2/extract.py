@@ -69,17 +69,26 @@ async def extract_from_chunks(
     batch_size: int = 3,
 ) -> tuple[list[dict], list[dict]]:
     """Extract entities and relations from chunks. Returns (entities, relations)."""
+    from ..domain import load_prompt
+
     all_entities = []
     all_relations = []
     entity_types_str = _format_types(config)
     relation_types_str = _format_relations(config)
     valid_triplets_str = _format_triplets(config)
 
+    sys_prompt = load_prompt(config, "extract_entities.md") or EXTRACT_SYSTEM
+    user_template = load_prompt(config, "extract_relations.md") or EXTRACT_USER
+
+    # Append domain-specific description template as formatting guidance
+    if config.entity_description_template:
+        sys_prompt += "\n\nFor entity descriptions, follow this format:\n" + config.entity_description_template
+
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i:i + batch_size]
         combined_text = "\n\n---\n\n".join(text for _, text in batch)
 
-        prompt = EXTRACT_USER.format(
+        prompt = user_template.format(
             entity_types=entity_types_str,
             relation_types=relation_types_str,
             valid_triplets=valid_triplets_str,
@@ -89,7 +98,7 @@ async def extract_from_chunks(
         for attempt in range(3):
             try:
                 response = await llm.chat([
-                    {"role": "system", "content": EXTRACT_SYSTEM},
+                    {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": prompt},
                 ])
                 data = _parse_json(response)

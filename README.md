@@ -71,7 +71,6 @@ documents ──ingest──► L1 Chunks (FTS + Vector)
 | L2 | `graph_build` | Build knowledge graph from docs |
 | L2 | `graph_navigate` | Single-step graph traversal |
 | L2 | `search_entities` | Search entities by name |
-| L2 | `entity_get` | Get entity details + relations |
 | L2 | `entity_register` | Register entity manually |
 | L2 | `relation_set` | Create/update relation |
 | L2 | `relation_list` | List entity relations |

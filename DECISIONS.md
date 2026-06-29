@@ -31,7 +31,7 @@ domains/reading/
 
 ## MCP tools (MVP)
 L1: doc_ingest, search_chunks, search_entities, search_insights, doc_get
-L2: graph_build, graph_navigate, entity_get, entity_register, relation_set, relation_list
+L2: graph_build, graph_navigate, entity_register, relation_set, relation_list
 L3: insight_record, insight_list
 Meta: graph_stats
 

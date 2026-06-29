@@ -75,14 +75,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS insights_fts USING fts5(
     tokenize='unicode61'
 );
 
-CREATE TABLE IF NOT EXISTS entity_summaries (
-    entity_name TEXT NOT NULL UNIQUE,
-    slug TEXT NOT NULL,
-    summary TEXT DEFAULT '',
-    source_docs_json TEXT DEFAULT '[]',
-    related_insights_json TEXT DEFAULT '[]'
-);
-
 CREATE TABLE IF NOT EXISTS query_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     query_text TEXT NOT NULL,
@@ -140,6 +132,13 @@ def get_db(db_path: str) -> _NoClose:
     conn.enable_load_extension(False)
     conn.executescript(SCHEMA)
     conn.commit()
+
+    # Run pending migrations (idempotent, safe to run every startup)
+    from ..migrate import auto_migrate
+    applied = auto_migrate(conn)
+    if applied:
+        conn.commit()
+
     _conn = _NoClose(conn)
     return _conn
 

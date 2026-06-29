@@ -40,8 +40,7 @@ async def list_tools():
         Tool(name="search_entities", description="Search entities by name (fuzzy match + aliases)", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Entity name to search"}, "entity_type": {"type": "string", "description": "Optional entity type filter"}}}),
         Tool(name="search_insights", description="Search insights by title and content", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "top_n": {"type": "integer", "default": 5, "description": "Number of results"}}}),
         Tool(name="doc_get", description="Get document chunk content by chunk ID", inputSchema={"type": "object", "properties": {"chunk_id": {"type": "integer", "description": "Chunk ID to retrieve"}}}),
-        Tool(name="entity_get", description="Get entity details and its relations", inputSchema={"type": "object", "properties": {"name": {"type": "string", "description": "Entity canonical name"}}}),
-        Tool(name="relation_set", description="Create or update a relation between two entities", inputSchema={"type": "object", "properties": {"entity_a": {"type": "string"}, "entity_b": {"type": "string"}, "relation_type": {"type": "string"}, "weight": {"type": "number", "default": 1.0}}}),
+        Tool(name="relation_set", description="Create or update a relation between two entities", inputSchema={"type": "object", "properties": {"entity_a": {"type": "string"}, "entity_b": {"type": "string"}, "relation_type": {"type": "string"}, "weight": {"type": "number", "default": 1.0}, "source_docs": {"type": "array", "items": {"type": "string"}, "description": "Optional source document titles"}}}),
         Tool(name="relation_list", description="List all relations for an entity", inputSchema={"type": "object", "properties": {"entity_name": {"type": "string"}}}),
         Tool(name="graph_navigate", description="Navigate from an entity: single-step expansion, returns anchored and exploration edges", inputSchema={"type": "object", "properties": {"seed": {"type": "string", "description": "Starting entity name"}, "mode": {"type": "string", "enum": ["explore", "focus"], "default": "explore"}}}),
         Tool(name="doc_ingest", description="Ingest a document into L1: accepts .md, .txt, .epub files", inputSchema={"type": "object", "properties": {"file_path": {"type": "string", "description": "Absolute path to the document file"}, "title": {"type": "string", "description": "Optional title override"}, "author": {"type": "string", "description": "Optional author"}}}),
@@ -73,8 +72,6 @@ async def call_tool(name: str, arguments: dict):
             return await _doc_get(db, arguments)
         elif name == "graph_build":
             return await _graph_build(db, config, arguments)
-        elif name == "entity_get":
-            return await _entity_get(db, arguments)
         elif name == "entity_register":
             return await _entity_register(db, arguments)
         elif name == "relation_set":
@@ -216,6 +213,7 @@ async def _search_chunks(db, args) -> list[TextContent]:
     tokenizer = create_tokenizer_provider(config.tokenizer)
     reranker = create_reranker_provider(config.reranker)
     results = await hybrid_search(db, query, query_vec, top_n, tokenizer, reranker)
+    _record_query_history(db, query, "search_chunks", [{"chunk_id": r["chunk_id"], "doc_title": r["doc_title"]} for r in results[:5]])
     return [TextContent(type="text", text=_json_result({"results": results, "count": len(results)}))]
 
 
@@ -230,20 +228,22 @@ async def _search_entities(db, args) -> list[TextContent]:
     rows = db.execute(sql, params).fetchall()
     results = [{"name": r[0], "type": r[1], "aliases": json.loads(r[2]),
                 "description": r[3], "cross_doc_count": r[4]} for r in rows]
+    _record_query_history(db, query, "search_entities", [{"name": r["name"], "type": r["type"]} for r in results[:10]])
     return [TextContent(type="text", text=_json_result({"results": results, "count": len(results)}))]
 
 
 async def _search_insights(db, args) -> list[TextContent]:
     query = args["query"]
     top_n = args.get("top_n", 5)
-    # ponytail: LIKE-based for MVP; upgrade path to FTS5+vector
     rows = db.execute(
-        "SELECT id, slug, title, content, created_at FROM insights "
-        "WHERE title LIKE ? OR content LIKE ? ORDER BY created_at DESC LIMIT ?",
-        (f"%{query}%", f"%{query}%", top_n)
+        "SELECT i.id, i.slug, i.title, i.content, i.created_at FROM insights i "
+        "JOIN insights_fts f ON i.rowid = f.rowid "
+        "WHERE insights_fts MATCH ? ORDER BY rank LIMIT ?",
+        (query, top_n)
     ).fetchall()
     results = [{"id": r[0], "slug": r[1], "title": r[2],
                 "content": r[3][:300], "created_at": r[4]} for r in rows]
+    _record_query_history(db, query, "search_insights", [{"slug": r["slug"], "title": r["title"]} for r in results[:5]])
     return [TextContent(type="text", text=_json_result({"results": results, "count": len(results)}))]
 
 
@@ -262,38 +262,12 @@ async def _doc_get(db, args) -> list[TextContent]:
     }))]
 
 
-async def _entity_get(db, args) -> list[TextContent]:
-    name = args["name"]
-    entity = db.execute(
-        "SELECT canonical_name, entity_type, aliases_json, description, source, cross_doc_count "
-        "FROM entities WHERE canonical_name = ?", (name,)
-    ).fetchone()
-    if not entity:
-        return [TextContent(type="text", text=f"Entity not found: {name}")]
-
-    relations = db.execute(
-        "SELECT entity_a, entity_b, relation_type, weight FROM relations "
-        "WHERE entity_a = ? OR entity_b = ? ORDER BY weight DESC",
-        (name, name)
-    ).fetchall()
-
-    summary = db.execute(
-        "SELECT summary FROM entity_summaries WHERE entity_name = ?", (name,)
-    ).fetchone()
-
-    return [TextContent(type="text", text=_json_result({
-        "name": entity[0], "type": entity[1], "aliases": json.loads(entity[2]),
-        "description": entity[3], "source": entity[4], "cross_doc_count": entity[5],
-        "summary": summary[0] if summary else "",
-        "relations": [{"a": r[0], "b": r[1], "type": r[2], "weight": r[3]} for r in relations]
-    }))]
-
-
 async def _relation_set(db, args) -> list[TextContent]:
+    source_docs = json.dumps(args.get("source_docs", []), ensure_ascii=False)
     db.execute(
-        "INSERT OR REPLACE INTO relations (entity_a, entity_b, relation_type, weight, last_seen) "
-        "VALUES (?, ?, ?, ?, datetime('now'))",
-        (args["entity_a"], args["entity_b"], args["relation_type"], args.get("weight", 1.0))
+        "INSERT OR REPLACE INTO relations (entity_a, entity_b, relation_type, weight, source_docs_json, first_seen, last_seen) "
+        "VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+        (args["entity_a"], args["entity_b"], args["relation_type"], args.get("weight", 1.0), source_docs)
     )
     db.execute("INSERT OR IGNORE INTO entity_traces (entity_name, source, last_seen) VALUES (?, 'relation_set', datetime('now'))", (args["entity_a"],))
     db.execute("INSERT OR IGNORE INTO entity_traces (entity_name, source, last_seen) VALUES (?, 'relation_set', datetime('now'))", (args["entity_b"],))
@@ -368,6 +342,15 @@ async def _graph_navigate(db, config: DomainConfig, args) -> list[TextContent]:
     }))]
 
 
+def _record_query_history(db, query: str, tool_name: str, results: list[dict]):
+    """Record search footprint for interest graph."""
+    db.execute(
+        "INSERT INTO query_history (query_text, tool_name, top_results_json) VALUES (?, ?, ?)",
+        (query, tool_name, json.dumps(results, ensure_ascii=False))
+    )
+    db.commit()
+
+
 async def _insight_record(db, config: DomainConfig, args) -> list[TextContent]:
     import re
     title = args["title"]
@@ -381,6 +364,11 @@ async def _insight_record(db, config: DomainConfig, args) -> list[TextContent]:
         (slug, title, content, json.dumps(source_docs, ensure_ascii=False))
     )
     insight_id = cursor.lastrowid
+    # Sync to FTS5 index
+    db.execute(
+        "INSERT OR REPLACE INTO insights_fts(rowid, title, content) VALUES (?, ?, ?)",
+        (insight_id, title, content)
+    )
 
     # Reverse extract entities and link to L2
     link_result = {}

@@ -12,7 +12,7 @@ providers:
   llm:
     base_url: https://api.deepseek.com/v1
     driver: openai
-    model: deepseek-chat
+    model: deepseek-v4-flash
   reranker:
     driver: voyage
     model: rerank-2-lite

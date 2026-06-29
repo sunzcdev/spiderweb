@@ -87,6 +87,17 @@ def load_domain(domain_path: str) -> DomainConfig:
     return config
 
 
+def load_prompt(config: DomainConfig, name: str) -> str | None:
+    """Load a prompt template from the domain's prompts/ directory."""
+    if not config.prompts_dir:
+        return None
+    path = os.path.join(config.prompts_dir, name)
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
 def get_entity_types_flat(config: DomainConfig) -> set[str]:
     """Flatten entity type tree to a set of all valid types (including subtypes like person.ruler)."""
     types = set()

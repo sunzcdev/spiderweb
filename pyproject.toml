@@ -23,3 +23,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spiderweb"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: real LLM end-to-end tests (require API keys)",
+]
+asyncio_mode = "auto"
