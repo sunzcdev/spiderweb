@@ -145,54 +145,67 @@ def _epub_to_markdown(file_path: str) -> str:
 
 # === Vector indexing ===
 
-def ensure_vec_table(db, dimensions: int):
+def ensure_vec_table(db, dimensions: int, table_name: str = "chunks_vec"):
     """Create vec0 table if it doesn't exist. Must match stored dimensions."""
     # sqlite_vec already loaded by get_db()
-    existing = db.execute("SELECT value FROM _meta WHERE key = 'embedding_dimensions'").fetchone()
+    meta_key = f'vec_dim_{table_name}' if table_name != 'chunks_vec' else 'embedding_dimensions'
+    existing = db.execute(f"SELECT value FROM _meta WHERE key = ?", (meta_key,)).fetchone()
     if existing:
         stored_dim = int(existing[0])
         if stored_dim != dimensions:
             raise ValueError(
-                f"Embedding dimensions mismatch: stored {stored_dim}, configured {dimensions}. "
+                f"Embedding dimensions mismatch for {table_name}: stored {stored_dim}, configured {dimensions}. "
                 "Cannot change embedding model after graph creation."
             )
         return  # Already initialized
 
-    db.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[{dimensions}])")
-    db.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES ('embedding_dimensions', ?)", (str(dimensions),))
-    db.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES ('has_vectors', '1')")
+    db.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS {table_name} USING vec0(embedding float[{dimensions}])")
+    db.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)", (meta_key, str(dimensions)))
+    if table_name == 'chunks_vec':
+        db.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES ('has_vectors', '1')")
+    else:
+        db.execute("INSERT OR REPLACE INTO _meta (key, value) VALUES (?, '1')",
+                   (f'has_vectors_{table_name}',))
     db.commit()
 
 
-async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int]) -> int:
-    """Embed chunks and insert into chunks_vec. Returns count indexed."""
+async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int],
+                       table_name: str = "chunks_vec", text_getter=None) -> int:
+    """Embed texts and insert into vec0 table. Returns count indexed."""
     if not chunk_ids:
         return 0
 
-    ensure_vec_table(db, provider.dimensions)
+    ensure_vec_table(db, provider.dimensions, table_name)
     count = 0
 
-    # Process in batches
+    # Default text getter: read from chunks table
+    if text_getter is None:
+        def text_getter(ids):
+            rows = db.execute(
+                f"SELECT id, body FROM chunks WHERE id IN ({','.join('?' * len(ids))})",
+                ids
+            ).fetchall()
+            return [(r[0], r[1]) for r in rows]
+
     batch_size = 32
     for i in range(0, len(chunk_ids), batch_size):
         batch = chunk_ids[i:i + batch_size]
-        rows = db.execute(
-            f"SELECT id, body FROM chunks WHERE id IN ({','.join('?' * len(batch))})",
-            batch
-        ).fetchall()
+        id_text_pairs = text_getter(batch)
+        if not id_text_pairs:
+            continue
 
-        texts = [r[1] for r in rows]
-        ids = [r[0] for r in rows]
+        ids = [p[0] for p in id_text_pairs]
+        texts = [p[1] for p in id_text_pairs]
 
         try:
             embeddings = await provider.embed(texts)
         except Exception as e:
             raise RuntimeError(f"Embedding failed: {e}") from e
 
-        for chunk_id, vec in zip(ids, embeddings):
+        for rowid, vec in zip(ids, embeddings):
             db.execute(
-                "INSERT OR REPLACE INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
-                (chunk_id, json.dumps(vec))
+                f"INSERT OR REPLACE INTO {table_name}(rowid, embedding) VALUES (?, ?)",
+                (rowid, json.dumps(vec))
             )
             count += 1
 

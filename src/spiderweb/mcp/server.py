@@ -235,16 +235,25 @@ async def _search_entities(db, args) -> list[TextContent]:
 async def _search_insights(db, args) -> list[TextContent]:
     query = args["query"]
     top_n = args.get("top_n", 5)
+    config = get_config()
     results = []
     seen = set()
 
-    # FTS5 first (word-level precision with jieba if available)
+    # FTS5 (jieba-tokenized, word-level precision)
+    tokenizer = create_tokenizer_provider(config.tokenizer)
+    if tokenizer:
+        tokenized = tokenizer.tokenize(query)
+        tokens = tokenized.split()
+        fts_query = " ".join(f"{t}*" for t in tokens) if tokens else query
+    else:
+        fts_query = query
+
     try:
         fts_rows = db.execute(
             "SELECT i.id, i.slug, i.title, i.content, i.created_at FROM insights i "
             "JOIN insights_fts f ON i.rowid = f.rowid "
             "WHERE insights_fts MATCH ? ORDER BY rank LIMIT ?",
-            (query, top_n * 2)
+            (fts_query, top_n * 2)
         ).fetchall()
         for r in fts_rows:
             if r[0] not in seen:
@@ -254,7 +263,7 @@ async def _search_insights(db, args) -> list[TextContent]:
     except Exception:
         pass
 
-    # LIKE fallback for Chinese text (unicode61 doesn't segment CJK)
+    # LIKE fallback (substring recall)
     like_rows = db.execute(
         "SELECT id, slug, title, content, created_at FROM insights "
         "WHERE title LIKE ? OR content LIKE ? ORDER BY created_at DESC LIMIT ?",
@@ -265,6 +274,29 @@ async def _search_insights(db, args) -> list[TextContent]:
             seen.add(r[0])
             results.append({"id": r[0], "slug": r[1], "title": r[2],
                            "content": r[3][:300], "created_at": r[4], "source": "like"})
+
+    # Vector search (semantic)
+    emb_provider = create_embedding_provider(config.embedding)
+    if emb_provider:
+        has_vec = db.execute("SELECT value FROM _meta WHERE key = 'has_vectors_insights_vec'").fetchone()
+        if has_vec and has_vec[0] == '1':
+            try:
+                vecs = await emb_provider.embed([query])
+                query_vec = vecs[0]
+                vec_rows = db.execute(
+                    "SELECT i.id, i.slug, i.title, i.content, i.created_at, v.distance "
+                    "FROM insights_vec v "
+                    "JOIN insights i ON v.rowid = i.id "
+                    "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
+                    (json.dumps(query_vec), top_n * 2)
+                ).fetchall()
+                for r in vec_rows:
+                    if r[0] not in seen:
+                        seen.add(r[0])
+                        results.append({"id": r[0], "slug": r[1], "title": r[2],
+                                       "content": r[3][:300], "created_at": r[4], "source": "vector"})
+            except Exception:
+                pass
 
     results = results[:top_n]
     _record_query_history(db, query, "search_insights", [{"slug": r["slug"], "title": r["title"]} for r in results[:5]])
@@ -388,11 +420,31 @@ async def _insight_record(db, config: DomainConfig, args) -> list[TextContent]:
         (slug, title, content, json.dumps(source_docs, ensure_ascii=False))
     )
     insight_id = cursor.lastrowid
-    # Sync to FTS5 index
+
+    # FTS5: write jieba-tokenized text for Chinese word segmentation
+    tokenizer = create_tokenizer_provider(config.tokenizer)
+    fts_title = tokenizer.tokenize(title) if tokenizer else title
+    fts_content = tokenizer.tokenize(content) if tokenizer else content
     db.execute(
         "INSERT OR REPLACE INTO insights_fts(rowid, title, content) VALUES (?, ?, ?)",
-        (insight_id, title, content)
+        (insight_id, fts_title, fts_content)
     )
+
+    # Vector: embed insight content for semantic search
+    emb_provider = create_embedding_provider(config.embedding)
+    vec_count = 0
+    if emb_provider:
+        from ..engine.l1.ingest import index_vectors, ensure_vec_table
+        ensure_vec_table(db, emb_provider.dimensions, "insights_vec")
+        try:
+            vecs = await emb_provider.embed([f"{title}\n{content}"])
+            db.execute(
+                "INSERT OR REPLACE INTO insights_vec(rowid, embedding) VALUES (?, ?)",
+                (insight_id, json.dumps(vecs[0]))
+            )
+            vec_count = 1
+        except Exception:
+            pass  # non-fatal: insight stored, just no vector
 
     # Reverse extract entities and link to L2
     link_result = {}
@@ -409,6 +461,7 @@ async def _insight_record(db, config: DomainConfig, args) -> list[TextContent]:
         "slug": slug,
         "insight_id": insight_id,
         "linked": link_result,
+        "vectors": vec_count,
     }))]
 
 
