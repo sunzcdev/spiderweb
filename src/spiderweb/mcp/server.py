@@ -163,30 +163,25 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
         chunk_ids.append(cid)
         chunk_count += 1
 
-    db.commit()
-    print(f"[spiderweb] doc_ingest: #{doc_id} '{title}' — {chunk_count} chunks ingested", file=sys.stderr)
-
-    # Kick off slow ops in background (vector indexing + graph_build)
-    import asyncio as _asyncio
-
-    async def _bg_vector_and_graph():
-        """Background: vector indexing then graph_build. Non-fatal."""
-        vec_count = 0
-        emb_provider = create_embedding_provider(config.embedding)
-        if emb_provider:
-            try:
-                vec_count = await index_vectors(db, emb_provider, chunk_ids)
-                print(f"[spiderweb] doc_ingest #{doc_id}: {vec_count} vectors indexed", file=sys.stderr)
-            except Exception as e:
-                print(f"[spiderweb] doc_ingest #{doc_id}: vector indexing failed: {e}", file=sys.stderr)
-
+    # Vector indexing (if embedding provider configured)
+    vec_count = 0
+    emb_provider = create_embedding_provider(config.embedding)
+    if emb_provider:
         try:
-            graph_result = await build_graph(db, config, doc_ids=[doc_id])
-            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build done — {graph_result.get('entities_found', 0)} entities", file=sys.stderr)
+            vec_count = await index_vectors(db, emb_provider, chunk_ids)
+            print(f"[spiderweb] doc_ingest #{doc_id}: {vec_count} vectors indexed", file=sys.stderr)
         except Exception as e:
-            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build failed: {e}", file=sys.stderr)
+            print(f"[spiderweb] doc_ingest #{doc_id}: vector indexing failed: {e}", file=sys.stderr)
 
-    _asyncio.create_task(_bg_vector_and_graph())
+    db.commit()
+
+    # Auto graph_build: extract entities + relations from the just-ingested doc
+    graph_result = None
+    try:
+        graph_result = await build_graph(db, config, doc_ids=[doc_id])
+        print(f"[spiderweb] doc_ingest #{doc_id}: graph_build done — {graph_result.get('entities_found', 0)} entities", file=sys.stderr)
+    except Exception as e:
+        print(f"[spiderweb] doc_ingest #{doc_id}: graph_build failed: {e}", file=sys.stderr)
 
     return [TextContent(type="text", text=_json_result({
         "ok": True,
@@ -194,8 +189,8 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
         "title": title,
         "author": author,
         "chunks": chunk_count,
-        "vectors": "pending",
-        "graph": "pending",
+        "vectors": vec_count,
+        "graph": graph_result,
         "replaced": replaced,
     }))]
 
