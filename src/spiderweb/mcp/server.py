@@ -172,6 +172,12 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
 
 async def _graph_build(db, config: DomainConfig, args) -> list[TextContent]:
     doc_ids = args.get("doc_ids", [])
+    if not doc_ids:
+        return [TextContent(type="text", text=_json_result({
+            "error": "doc_ids required — pass explicit doc IDs, or use 'all' to process everything"
+        }))]
+    if doc_ids == ["all"]:
+        doc_ids = None  # process all
     result = await build_graph(db, config, doc_ids=doc_ids if doc_ids else None)
     return [TextContent(type="text", text=_json_result(result))]
 
@@ -391,7 +397,7 @@ async def _graph_navigate(db, config: DomainConfig, args) -> list[TextContent]:
     if not row:
         row = db.execute("SELECT canonical_name, entity_type FROM entities WHERE canonical_name LIKE ? LIMIT 1", (f"%{seed}%",)).fetchone()
     if not row:
-        return [TextContent(type="text", text=f"Entity not found: {seed}")]
+        return [TextContent(type="text", text=_json_result({"error": "not_found", "seed": seed}))]
 
     name, etype = row
 

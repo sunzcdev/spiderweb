@@ -127,3 +127,7 @@ def main():
         parser.print_help()
         sys.exit(1)
     args.func(args)
+
+
+if __name__ == "__main__":
+    main()
