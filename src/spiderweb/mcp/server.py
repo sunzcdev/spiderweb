@@ -2,12 +2,14 @@
 import os
 import sys
 import json
+import time
 import argparse
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from ..engine.db import get_db, get_db_path
+from ..debug import init as debug_init, tool_call as debug_call, tool_result as debug_result, tool_error as debug_error
 from ..engine.domain import load_domain, DomainConfig
 from ..engine.l1.ingest import ingest_file, index_vectors, hybrid_search
 from ..engine.l2.build import build_graph
@@ -54,39 +56,51 @@ async def list_tools():
 @server.call_tool()
 async def call_tool(name: str, arguments: dict):
     config = get_config()
+    # Lazy debug init (also called in main() for MCP startup)
+    if os.environ.get("SPIDERWEB_DEBUG") == "1":
+        debug_init(config.data_dir)
+
+    debug_call(name, arguments)
+    t0 = time.time()
     db_path = get_db_path(config.data_dir)
     db = get_db(db_path)
 
     try:
         if name == "graph_stats":
-            return await _graph_stats(db)
+            result = await _graph_stats(db)
         elif name == "search_chunks":
-            return await _search_chunks(db, arguments)
+            result = await _search_chunks(db, arguments)
         elif name == "search_entities":
-            return await _search_entities(db, arguments)
+            result = await _search_entities(db, arguments)
         elif name == "search_insights":
-            return await _search_insights(db, arguments)
+            result = await _search_insights(db, arguments)
         elif name == "doc_ingest":
-            return await _doc_ingest(db, config, arguments)
+            result = await _doc_ingest(db, config, arguments)
         elif name == "doc_get":
-            return await _doc_get(db, arguments)
+            result = await _doc_get(db, arguments)
         elif name == "graph_build":
-            return await _graph_build(db, config, arguments)
+            result = await _graph_build(db, config, arguments)
         elif name == "entity_register":
-            return await _entity_register(db, arguments)
+            result = await _entity_register(db, arguments)
         elif name == "relation_set":
-            return await _relation_set(db, arguments)
+            result = await _relation_set(db, arguments)
         elif name == "relation_list":
-            return await _relation_list(db, arguments)
+            result = await _relation_list(db, arguments)
         elif name == "graph_navigate":
-            return await _graph_navigate(db, config, arguments)
+            result = await _graph_navigate(db, config, arguments)
         elif name == "insight_record":
-            return await _insight_record(db, config, arguments)
+            result = await _insight_record(db, config, arguments)
         elif name == "insight_list":
-            return await _insight_list(db, arguments)
+            result = await _insight_list(db, arguments)
         else:
-            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+            result = [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+        elapsed = (time.time() - t0) * 1000
+        debug_result(name, result, elapsed)
+        return result
     except Exception as e:
+        elapsed = (time.time() - t0) * 1000
+        debug_error(name, str(e), elapsed)
         return [TextContent(type="text", text=f"Error: {e}")]
 
 
@@ -492,6 +506,11 @@ async def main(domain_path: str | None = None):
 
     global _config
     _config = load_domain(os.environ["SPIDERWEB_DOMAIN"])
+
+    # Init debug logging
+    if os.environ.get("SPIDERWEB_DEBUG") == "1":
+        debug_init(_config.data_dir)
+        sys.stderr.write(f"[spiderweb] debug logging to {_config.data_dir}/debug.log\n")
 
     async with stdio_server() as (reader, writer):
         await server.run(reader, writer, server.create_initialization_options())
