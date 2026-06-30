@@ -38,7 +38,7 @@ def _json_result(data) -> str:
 async def list_tools():
     return [
         # ── L1: document layer ──
-        Tool(name="doc_ingest", description="Ingest a document (.md/.txt/.epub). Returns quickly; vector indexing and graph extraction run in background.", inputSchema={"type": "object", "properties": {"file_path": {"type": "string", "description": "Absolute path to the document file"}, "title": {"type": "string", "description": "Optional title override"}, "author": {"type": "string", "description": "Optional author"}}}),
+        Tool(name="doc_ingest", description="Ingest a document (.md/.txt/.epub). Synchronous: returns after vector indexing + graph extraction complete, with progress notifications.", inputSchema={"type": "object", "properties": {"file_path": {"type": "string", "description": "Absolute path to the document file"}, "title": {"type": "string", "description": "Optional title override"}, "author": {"type": "string", "description": "Optional author"}}}),
         Tool(name="search_chunks", description="Search document chunks using hybrid FTS5 + LIKE + vector search", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "top_n": {"type": "integer", "default": 5, "description": "Number of results"}}}),
         # ── L2: knowledge graph layer ──
         Tool(name="search_entities", description="Search entities by name (fuzzy match + aliases)", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Entity name to search"}}}),
