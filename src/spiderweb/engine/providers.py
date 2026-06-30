@@ -88,6 +88,7 @@ def create_llm_provider(config: dict) -> LLMProvider:
         return OpenAILLM(
             model=config.get("model", "deepseek-chat"),
             base_url=config.get("base_url", "https://api.deepseek.com/v1"),
+            api_key=config.get("api_key", ""),
         )
     raise ValueError(f"Unknown LLM driver: {driver}")
 
@@ -151,5 +152,6 @@ def create_embedding_provider(config: dict) -> EmbeddingProvider | None:
     if driver == "voyage":
         return VoyageEmbedding(
             model=config.get("model", "voyage-4-large"),
+            api_key=config.get("api_key", ""),
         )
     raise ValueError(f"Unknown embedding driver: {driver}")
