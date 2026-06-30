@@ -35,6 +35,7 @@ class DomainConfig:
 
 def load_domain(domain_path: str) -> DomainConfig:
     """Load a domain pack from a directory path."""
+    import sys
     dp = Path(domain_path)
     if not dp.is_dir():
         raise FileNotFoundError(f"Domain path not found: {domain_path}")
@@ -54,6 +55,9 @@ def load_domain(domain_path: str) -> DomainConfig:
         config.entity_description_template = raw.get("entity_description_template", "")
     else:
         config.name = dp.name
+        print(f"[spiderweb] WARNING: no domain.yaml found at {domain_path} — "
+              "this may not be a domain pack directory. "
+              "SPIDERWEB_DOMAIN should point to a directory with domain.yaml + config.yaml.", file=sys.stderr)
 
     # Load config.yaml (runtime config)
     config_yaml = dp / "config.yaml"
@@ -71,6 +75,10 @@ def load_domain(domain_path: str) -> DomainConfig:
         config.reranker = raw.get("providers", {}).get("reranker", {})
     else:
         config.data_dir = os.path.expanduser(f"~/.spiderweb/{config.name}")
+        print(f"[spiderweb] WARNING: no config.yaml found at {domain_path} — "
+              "providers (LLM/embedding/tokenizer/reranker) will NOT be configured. "
+              "Chinese FTS5 search will not work without a tokenizer. "
+              "Set SPIDERWEB_DOMAIN to the domain pack directory (e.g. .../domains/reading/).", file=sys.stderr)
 
     # Prompt templates
     prompts_dir = dp / "prompts"
