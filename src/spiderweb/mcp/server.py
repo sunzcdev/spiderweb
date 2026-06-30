@@ -120,6 +120,13 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
     title_override = args.get("title", "")
     author_override = args.get("author", "")
 
+    # Auto-dedup: if same file path was ingested before, delete old L1 first
+    replaced = False
+    existing = db.execute("SELECT id FROM docs WHERE path = ?", (file_path,)).fetchone()
+    if existing:
+        await _doc_delete(db, {"doc_id": existing[0]})
+        replaced = True
+
     title, author, chunks = ingest_file(
         file_path,
         chunk_size=config.chunk_size,
@@ -182,6 +189,7 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
         "author": author,
         "chunks": chunk_count,
         "vectors": vec_count,
+        "replaced": replaced,
         "graph": graph_result,
     }))]
 
