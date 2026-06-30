@@ -161,8 +161,7 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
         try:
             vec_count = await index_vectors(db, emb_provider, chunk_ids)
         except Exception as e:
-            # Vector indexing failure is non-fatal — doc ingested, just no vectors
-            pass
+            print(f"[spiderweb] vector indexing failed for doc #{doc_id} '{title}': {e}", file=sys.stderr)
 
     db.commit()
 
@@ -170,8 +169,8 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
     graph_result = None
     try:
         graph_result = await build_graph(db, config, doc_ids=[doc_id])
-    except Exception:
-        pass  # non-fatal: doc ingested, can build graph later
+    except Exception as e:
+        print(f"[spiderweb] auto graph_build failed for doc #{doc_id} '{title}': {e}", file=sys.stderr)
 
     return [TextContent(type="text", text=_json_result({
         "ok": True,
