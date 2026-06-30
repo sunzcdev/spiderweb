@@ -111,28 +111,46 @@ async def extract_from_chunks(
             await _backoff(attempt)
         return None, None
 
+    # Safe char limit per LLM call: prompt template ~2K chars overhead,
+    # deepseek-chat has 64K token context. 50K tokens ≈ 200K chars for Chinese.
+    MAX_CHARS_PER_CALL = 180_000
+
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i:i + batch_size]
-        combined_text = "\n\n---\n\n".join(text for _, text in batch)
 
-        prompt = user_template.format(
-            entity_types=entity_types_str,
-            relation_types=relation_types_str,
-            valid_triplets=valid_triplets_str,
-            text=combined_text,
-        )
+        # Split oversized batches by char count
+        sub_batches = []
+        current_group, current_chars = [], 0
+        for cid, text in batch:
+            text_len = len(text)
+            if current_chars + text_len > MAX_CHARS_PER_CALL and current_group:
+                sub_batches.append(current_group)
+                current_group, current_chars = [], 0
+            current_group.append((cid, text))
+            current_chars += text_len
+        if current_group:
+            sub_batches.append(current_group)
 
-        entities, relations = await _extract_batch(llm, prompt)
-        if entities is None:
-            # Fallback to deepseek-chat
-            if _fallback_llm is None:
-                from ..providers import OpenAILLM
-                _fallback_llm = OpenAILLM(model="deepseek-chat", base_url="https://api.deepseek.com/v1")
-            entities, relations = await _extract_batch(_fallback_llm, prompt)
+        for sub in sub_batches:
+            combined_text = "\n\n---\n\n".join(text for _, text in sub)
 
-        if entities:
-            all_entities.extend(entities)
-            all_relations.extend(relations)
+            prompt = user_template.format(
+                entity_types=entity_types_str,
+                relation_types=relation_types_str,
+                valid_triplets=valid_triplets_str,
+                text=combined_text,
+            )
+
+            entities, relations = await _extract_batch(llm, prompt)
+            if entities is None:
+                if _fallback_llm is None:
+                    from ..providers import OpenAILLM
+                    _fallback_llm = OpenAILLM(model="deepseek-chat", base_url="https://api.deepseek.com/v1")
+                entities, relations = await _extract_batch(_fallback_llm, prompt)
+
+            if entities:
+                all_entities.extend(entities)
+                all_relations.extend(relations)
 
     # Deduplicate entities by canonical name
     seen = {}
