@@ -111,9 +111,9 @@ async def extract_from_chunks(
             await _backoff(attempt)
         return None, None
 
-    # Safe char limit per LLM call: prompt template ~2K chars overhead,
-    # deepseek-chat has 64K token context. 50K tokens ≈ 200K chars for Chinese.
-    MAX_CHARS_PER_CALL = 180_000
+    # deepseek-chat has 64K token context. Prompt template takes ~3K tokens.
+    # Chinese: 1 token ≈ 1.5-2 chars. Safe: 40K chars ≈ 25K tokens for text.
+    MAX_CHARS_PER_CALL = 40_000
 
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i:i + batch_size]

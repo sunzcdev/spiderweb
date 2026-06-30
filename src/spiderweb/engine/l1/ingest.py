@@ -188,9 +188,8 @@ async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int],
             return [(r[0], r[1]) for r in rows]
 
     # Token limit: voyage-4-large max 120K input tokens per batch.
-    # Approximate: 1 token ≈ 4 chars for Chinese, 2 chars for English.
-    # Safe limit: 80K tokens ≈ 320K chars.
-    MAX_CHARS_PER_BATCH = 300_000
+    # Chinese: 1 token ≈ 1.5-2 chars. Safe limit: 80K chars ≈ 50K tokens.
+    MAX_CHARS_PER_BATCH = 80_000
 
     batch_size = 32
     for i in range(0, len(chunk_ids), batch_size):
