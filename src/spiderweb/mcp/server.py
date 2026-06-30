@@ -122,8 +122,9 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
 
     # Auto-dedup: if same file path was ingested before, delete old L1 first
     replaced = False
-    existing = db.execute("SELECT id FROM docs WHERE path = ?", (file_path,)).fetchone()
+    existing = db.execute("SELECT id, title FROM docs WHERE path = ?", (file_path,)).fetchone()
     if existing:
+        print(f"[spiderweb] doc_ingest: replacing existing doc #{existing[0]} '{existing[1]}' (same path)", file=sys.stderr)
         await _doc_delete(db, {"doc_id": existing[0]})
         replaced = True
 
@@ -372,6 +373,7 @@ async def _doc_delete(db, args) -> list[TextContent]:
 
     title = doc[0]
     chunk_count = db.execute("SELECT COUNT(*) FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()[0]
+    print(f"[spiderweb] doc_delete: #{doc_id} '{title}' — {chunk_count} chunks", file=sys.stderr)
 
     # Get chunk IDs for this doc
     chunk_ids = [r[0] for r in db.execute("SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)).fetchall()]
