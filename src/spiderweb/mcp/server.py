@@ -6,7 +6,7 @@ import time
 import argparse
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, ProgressNotification
 
 from ..engine.db import get_db, get_db_path
 from ..debug import init as debug_init, tool_call as debug_call, tool_result as debug_result, tool_error as debug_error
@@ -55,7 +55,7 @@ async def list_tools():
 
 
 @server.call_tool()
-async def call_tool(name: str, arguments: dict):
+async def call_tool(name: str, arguments: dict, context=None):
     config = get_config()
     # Lazy debug init (also called in main() for MCP startup)
     if os.environ.get("SPIDERWEB_DEBUG") == "1":
@@ -65,6 +65,16 @@ async def call_tool(name: str, arguments: dict):
     t0 = time.time()
     db_path = get_db_path(config.data_dir)
     db = get_db(db_path)
+
+    # Progress reporter for long-running tools
+    async def progress(ratio: float, msg: str):
+        if context:
+            try:
+                await context.session.send_notification(
+                    ProgressNotification(progress=ratio, total=1.0, message=msg)
+                )
+            except Exception:
+                pass
 
     try:
         if name == "graph_stats":
@@ -76,7 +86,7 @@ async def call_tool(name: str, arguments: dict):
         elif name == "search_insights":
             result = await _search_insights(db, arguments)
         elif name == "doc_ingest":
-            result = await _doc_ingest(db, config, arguments)
+            result = await _doc_ingest(db, config, arguments, progress)
         elif name == "doc_get":
             result = await _doc_get(db, arguments)
         elif name == "doc_delete":
@@ -92,7 +102,7 @@ async def call_tool(name: str, arguments: dict):
         elif name == "graph_navigate":
             result = await _graph_navigate(db, config, arguments)
         elif name == "insight_record":
-            result = await _insight_record(db, config, arguments)
+            result = await _insight_record(db, config, arguments, progress)
         elif name == "entity_get":
             result = await _entity_get(db, arguments)
         elif name == "connect":
@@ -113,10 +123,14 @@ async def call_tool(name: str, arguments: dict):
 
 # === Tool implementations ===
 
-async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
+async def _doc_ingest(db, config: DomainConfig, args, progress=None) -> list[TextContent]:
     file_path = os.path.expanduser(args["file_path"])
     title_override = args.get("title", "")
     author_override = args.get("author", "")
+
+    async def _p(ratio, msg):
+        if progress:
+            await progress(ratio, msg)
 
     # Auto-dedup: if same file path was ingested before, delete old L1 first
     replaced = False
@@ -139,6 +153,7 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
         author = author_override
 
     # Insert doc
+    await _p(0.05, f"解析完成：{title}")
     cursor = db.execute(
         "INSERT INTO docs (path, title, author) VALUES (?, ?, ?)",
         (file_path, title, author)
@@ -163,10 +178,13 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
         chunk_ids.append(cid)
         chunk_count += 1
 
+    await _p(0.1, f"段落索引完成：{chunk_count} 段")
+
     # Vector indexing (if embedding provider configured)
     vec_count = 0
     emb_provider = create_embedding_provider(config.embedding)
     if emb_provider:
+        await _p(0.15, f"开始向量化：{chunk_count} 段...")
         try:
             vec_count = await index_vectors(db, emb_provider, chunk_ids)
             print(f"[spiderweb] doc_ingest #{doc_id}: {vec_count} vectors indexed", file=sys.stderr)
@@ -174,13 +192,16 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
             print(f"[spiderweb] doc_ingest #{doc_id}: vector indexing failed: {e}", file=sys.stderr)
 
     db.commit()
+    await _p(0.5, "向量化完成，开始建网...")
 
     # Auto graph_build: extract entities + relations from the just-ingested doc
     graph_result = None
     try:
         graph_result = await build_graph(db, config, doc_ids=[doc_id])
+        await _p(0.95, f"建网完成：{graph_result.get('entities_found', 0)} 实体 / {graph_result.get('relations_added', 0)} 关系")
         print(f"[spiderweb] doc_ingest #{doc_id}: graph_build done — {graph_result.get('entities_found', 0)} entities", file=sys.stderr)
     except Exception as e:
+        await _p(0.95, "建网失败（书已入库，可稍后重建）")
         print(f"[spiderweb] doc_ingest #{doc_id}: graph_build failed: {e}", file=sys.stderr)
 
     return [TextContent(type="text", text=_json_result({
@@ -627,7 +648,7 @@ async def _connect(db, args) -> list[TextContent]:
     return [TextContent(type="text", text=_json_result({"path": [], "error": "no path found"}))]
 
 
-async def _insight_record(db, config: DomainConfig, args) -> list[TextContent]:
+async def _insight_record(db, config: DomainConfig, args, progress=None) -> list[TextContent]:
     import re
     title = args["title"]
     content = args["content"]
@@ -668,10 +689,14 @@ async def _insight_record(db, config: DomainConfig, args) -> list[TextContent]:
 
     # Reverse extract entities and link to L2
     link_result = {}
+    if progress:
+        await progress(0.7, "提取实体中...")
     try:
         llm = create_llm_provider(config.llm)
         entities, relations = await reverse_extract(llm, config, content)
         link_result = link_insight_to_entities(db, config, insight_id, entities, relations)
+        if progress:
+            await progress(0.95, f"已关联 {link_result.get('entities_extracted', 0)} 个实体")
     except Exception as e:
         link_result = {"error": str(e)}
 
