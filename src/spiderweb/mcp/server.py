@@ -42,6 +42,7 @@ async def list_tools():
         Tool(name="search_entities", description="Search entities by name (fuzzy match + aliases)", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Entity name to search"}, "entity_type": {"type": "string", "description": "Optional entity type filter"}}}),
         Tool(name="search_insights", description="Search insights by title and content", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "top_n": {"type": "integer", "default": 5, "description": "Number of results"}}}),
         Tool(name="doc_get", description="Get document chunk content by chunk ID", inputSchema={"type": "object", "properties": {"chunk_id": {"type": "integer", "description": "Chunk ID to retrieve"}}}),
+        Tool(name="doc_delete", description="Delete an ingested document and all its chunks + vectors", inputSchema={"type": "object", "properties": {"doc_id": {"type": "integer", "description": "Document ID to delete"}}, "required": ["doc_id"]}),
         Tool(name="relation_set", description="Create or update a relation between two entities", inputSchema={"type": "object", "properties": {"entity_a": {"type": "string"}, "entity_b": {"type": "string"}, "relation_type": {"type": "string"}, "weight": {"type": "number", "default": 1.0}, "source_docs": {"type": "array", "items": {"type": "string"}, "description": "Optional source document titles"}}}),
         Tool(name="relation_list", description="List all relations for an entity", inputSchema={"type": "object", "properties": {"entity_name": {"type": "string"}}}),
         Tool(name="graph_navigate", description="Navigate knowledge graph from an entity: anchored edges + exploration edges, with path trace and depth support", inputSchema={"type": "object", "properties": {"seed": {"type": "string", "description": "Starting entity name"}, "depth": {"type": "integer", "default": 1, "description": "Hops from seed (1=neighbors only, 2=two-hop path)"}, "mode": {"type": "string", "enum": ["explore", "focus"], "default": "explore"}}}),
@@ -80,6 +81,8 @@ async def call_tool(name: str, arguments: dict):
             result = await _doc_ingest(db, config, arguments)
         elif name == "doc_get":
             result = await _doc_get(db, arguments)
+        elif name == "doc_delete":
+            result = await _doc_delete(db, arguments)
         elif name == "graph_build":
             result = await _graph_build(db, config, arguments)
         elif name == "entity_register":
@@ -348,6 +351,48 @@ async def _doc_get(db, args) -> list[TextContent]:
     return [TextContent(type="text", text=_json_result({
         "chunk_id": row[0], "body": row[1], "section": row[2],
         "heading_level": row[3], "doc_title": row[4]
+    }))]
+
+
+async def _doc_delete(db, args) -> list[TextContent]:
+    doc_id = args["doc_id"]
+
+    # Get doc info before deleting
+    doc = db.execute("SELECT title FROM docs WHERE id = ?", (doc_id,)).fetchone()
+    if not doc:
+        return [TextContent(type="text", text=_json_result({"error": "not_found", "doc_id": doc_id}))]
+
+    title = doc[0]
+    chunk_count = db.execute("SELECT COUNT(*) FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()[0]
+
+    # Get chunk IDs for this doc
+    chunk_ids = [r[0] for r in db.execute("SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)).fetchall()]
+
+    # Delete vectors (order: child tables first)
+    vec_count = 0
+    for cid in chunk_ids:
+        try:
+            db.execute("DELETE FROM chunks_vec WHERE rowid = ?", (cid,))
+            vec_count += db.total_changes
+        except Exception:
+            pass
+
+    # Delete FTS5 index
+    db.execute("DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE doc_id = ?)", (doc_id,))
+
+    # Delete chunks
+    db.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+
+    # Delete doc
+    db.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
+    db.commit()
+
+    return [TextContent(type="text", text=_json_result({
+        "ok": True,
+        "doc_id": doc_id,
+        "title": title,
+        "chunks_deleted": chunk_count,
+        "vectors_deleted": vec_count,
     }))]
 
 
