@@ -187,6 +187,11 @@ async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int],
             ).fetchall()
             return [(r[0], r[1]) for r in rows]
 
+    # Token limit: voyage-4-large max 120K input tokens per batch.
+    # Approximate: 1 token ≈ 4 chars for Chinese, 2 chars for English.
+    # Safe limit: 80K tokens ≈ 320K chars.
+    MAX_CHARS_PER_BATCH = 300_000
+
     batch_size = 32
     for i in range(0, len(chunk_ids), batch_size):
         batch = chunk_ids[i:i + batch_size]
@@ -194,20 +199,33 @@ async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int],
         if not id_text_pairs:
             continue
 
-        ids = [p[0] for p in id_text_pairs]
-        texts = [p[1] for p in id_text_pairs]
+        # Split large batches to stay under token limit
+        sub_batches = []
+        current_ids, current_texts, current_chars = [], [], 0
+        for rid, text in id_text_pairs:
+            text_len = len(text)
+            if current_chars + text_len > MAX_CHARS_PER_BATCH and current_texts:
+                sub_batches.append((current_ids, current_texts))
+                current_ids, current_texts, current_chars = [], [], 0
+            current_ids.append(rid)
+            current_texts.append(text)
+            current_chars += text_len
+        if current_texts:
+            sub_batches.append((current_ids, current_texts))
 
-        try:
-            embeddings = await provider.embed(texts)
-        except Exception as e:
-            raise RuntimeError(f"Embedding failed: {e}") from e
+        for ids, texts in sub_batches:
+            try:
+                embeddings = await provider.embed(texts)
+            except Exception as e:
+                print(f"[spiderweb] embedding batch failed ({len(ids)} chunks, {sum(len(t) for t in texts)} chars): {e}", file=__import__('sys').stderr)
+                continue
 
-        for rowid, vec in zip(ids, embeddings):
-            db.execute(
-                f"INSERT OR REPLACE INTO {table_name}(rowid, embedding) VALUES (?, ?)",
-                (rowid, json.dumps(vec))
-            )
-            count += 1
+            for rowid, vec in zip(ids, embeddings):
+                db.execute(
+                    f"INSERT OR REPLACE INTO {table_name}(rowid, embedding) VALUES (?, ?)",
+                    (rowid, json.dumps(vec))
+                )
+                count += 1
 
     db.commit()
     return count
