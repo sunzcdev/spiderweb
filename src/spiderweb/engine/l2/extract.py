@@ -1,9 +1,15 @@
 """LLM-based entity and relation extraction from chunks."""
 import json
 import re
+import asyncio
 from ..providers import LLMProvider
 from ..domain import DomainConfig, get_entity_types_flat
 from ..hooks import run_validators
+
+
+async def _backoff(attempt: int):
+    """Exponential backoff: 0.5s, 1s, 2s."""
+    await asyncio.sleep(0.5 * (2 ** attempt))
 
 EXTRACT_SYSTEM = """You extract structured knowledge from text. Output ONLY valid JSON.
 
@@ -84,6 +90,27 @@ async def extract_from_chunks(
     if config.entity_description_template:
         sys_prompt += "\n\nFor entity descriptions, follow this format:\n" + config.entity_description_template
 
+    # Fallback model if primary returns empty (deepseek-v4-flash rate limit)
+    _fallback_llm = None
+
+    async def _extract_batch(provider, prompt):
+        for attempt in range(3):
+            try:
+                response = await provider.chat([
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": prompt},
+                ])
+                if not response or not response.strip():
+                    await _backoff(attempt)
+                    continue
+                data = _parse_json(response)
+                if data and "entities" in data:
+                    return data.get("entities", []), data.get("relations", [])
+            except Exception:
+                pass
+            await _backoff(attempt)
+        return None, None
+
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i:i + batch_size]
         combined_text = "\n\n---\n\n".join(text for _, text in batch)
@@ -95,21 +122,17 @@ async def extract_from_chunks(
             text=combined_text,
         )
 
-        for attempt in range(3):
-            try:
-                response = await llm.chat([
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": prompt},
-                ])
-                data = _parse_json(response)
-                if data and "entities" in data:
-                    all_entities.extend(data.get("entities", []))
-                    all_relations.extend(data.get("relations", []))
-                    break
-            except Exception:
-                if attempt == 2:
-                    raise
-                continue
+        entities, relations = await _extract_batch(llm, prompt)
+        if entities is None:
+            # Fallback to deepseek-chat
+            if _fallback_llm is None:
+                from ..providers import OpenAILLM
+                _fallback_llm = OpenAILLM(model="deepseek-chat", base_url="https://api.deepseek.com/v1")
+            entities, relations = await _extract_batch(_fallback_llm, prompt)
+
+        if entities:
+            all_entities.extend(entities)
+            all_relations.extend(relations)
 
     # Deduplicate entities by canonical name
     seen = {}

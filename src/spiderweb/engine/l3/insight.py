@@ -1,8 +1,14 @@
 """L3 insight reverse extraction — connect insights to L2 entities."""
 import json
 import re
+import asyncio
 from ..providers import LLMProvider, create_llm_provider
 from ..domain import DomainConfig, get_entity_types_flat
+
+
+async def _backoff(attempt: int):
+    """Exponential backoff: 0.5s, 1s, 2s."""
+    await asyncio.sleep(0.5 * (2 ** attempt))
 
 REVERSE_EXTRACT_SYSTEM = """You extract entities and relations from a user's personal note/insight.
 Output ONLY valid JSON.
@@ -47,19 +53,34 @@ async def reverse_extract(
 
     sys_prompt = load_prompt(config, "record_insight.md") or REVERSE_EXTRACT_SYSTEM
 
-    for attempt in range(3):
-        try:
-            response = await llm.chat([
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": prompt},
-            ])
-            data = _parse_json(response)
-            if data and "entities" in data:
-                return data.get("entities", []), data.get("relations", [])
-        except Exception:
-            if attempt == 2:
-                raise
-            continue
+    async def _try_extract(model_provider):
+        for attempt in range(3):
+            try:
+                response = await model_provider.chat([
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": prompt},
+                ])
+                if not response or not response.strip():
+                    continue  # empty response — retry
+                data = _parse_json(response)
+                if data and "entities" in data:
+                    return data.get("entities", []), data.get("relations", [])
+            except Exception:
+                pass
+            await _backoff(attempt)
+        return None
+
+    # Try primary model
+    result = await _try_extract(llm)
+    if result is not None:
+        return result
+
+    # Fallback to deepseek-chat if primary returned empty
+    from ..providers import OpenAILLM
+    fallback = OpenAILLM(model="deepseek-chat", base_url="https://api.deepseek.com/v1")
+    result = await _try_extract(fallback)
+    if result is not None:
+        return result
 
     return [], []
 
