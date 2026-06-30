@@ -37,22 +37,20 @@ def _json_result(data) -> str:
 @server.list_tools()
 async def list_tools():
     return [
-        Tool(name="graph_stats", description="Get graph statistics: doc count, entity count, relation count, insight count", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="search_chunks", description="Search document chunks using hybrid FTS5 search", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "top_n": {"type": "integer", "default": 5, "description": "Number of results"}}}),
-        Tool(name="search_entities", description="Search entities by name (fuzzy match + aliases)", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Entity name to search"}, "entity_type": {"type": "string", "description": "Optional entity type filter"}}}),
-        Tool(name="search_insights", description="Search insights by title and content", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "top_n": {"type": "integer", "default": 5, "description": "Number of results"}}}),
-        Tool(name="doc_get", description="Get document chunk content by chunk ID", inputSchema={"type": "object", "properties": {"chunk_id": {"type": "integer", "description": "Chunk ID to retrieve"}}}),
-        Tool(name="doc_delete", description="Delete an ingested document and all its chunks + vectors", inputSchema={"type": "object", "properties": {"doc_id": {"type": "integer", "description": "Document ID to delete"}}, "required": ["doc_id"]}),
-        Tool(name="relation_set", description="Create or update a relation between two entities", inputSchema={"type": "object", "properties": {"entity_a": {"type": "string"}, "entity_b": {"type": "string"}, "relation_type": {"type": "string"}, "weight": {"type": "number", "default": 1.0}, "source_docs": {"type": "array", "items": {"type": "string"}, "description": "Optional source document titles"}}}),
-        Tool(name="relation_list", description="List all relations for an entity", inputSchema={"type": "object", "properties": {"entity_name": {"type": "string"}}}),
-        Tool(name="graph_navigate", description="Navigate knowledge graph from an entity: anchored edges + exploration edges, with path trace and depth support", inputSchema={"type": "object", "properties": {"seed": {"type": "string", "description": "Starting entity name"}, "depth": {"type": "integer", "default": 1, "description": "Hops from seed (1=neighbors only, 2=two-hop path)"}, "mode": {"type": "string", "enum": ["explore", "focus"], "default": "explore"}}}),
-        Tool(name="doc_ingest", description="Ingest a document into L1: accepts .md, .txt, .epub files", inputSchema={"type": "object", "properties": {"file_path": {"type": "string", "description": "Absolute path to the document file"}, "title": {"type": "string", "description": "Optional title override"}, "author": {"type": "string", "description": "Optional author"}}}),
-        Tool(name="graph_build", description="Build/extend the knowledge graph by extracting entities and relations from ingested documents using LLM", inputSchema={"type": "object", "properties": {"doc_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional list of doc IDs to process. If empty, processes all docs."}}}),
-        Tool(name="entity_register", description="Manually register an entity in the knowledge graph", inputSchema={"type": "object", "properties": {"name": {"type": "string", "description": "Canonical entity name"}, "entity_type": {"type": "string", "description": "Entity type"}, "aliases": {"type": "array", "items": {"type": "string"}, "description": "Optional aliases"}, "description": {"type": "string", "description": "Optional description"}}}),
-        Tool(name="insight_record", description="Record an insight/note with optional source docs and entities", inputSchema={"type": "object", "properties": {"title": {"type": "string"}, "content": {"type": "string"}, "source_docs": {"type": "array", "items": {"type": "string"}, "description": "Optional list of doc titles"}}}),
-        Tool(name="entity_get", description="Get entity details: type, aliases, description, key relations, related insights, footprint", inputSchema={"type": "object", "properties": {"name": {"type": "string", "description": "Entity canonical name"}}}),
-        Tool(name="connect", description="Find shortest path between two entities in the knowledge graph", inputSchema={"type": "object", "properties": {"from": {"type": "string", "description": "Starting entity"}, "to": {"type": "string", "description": "Target entity"}}}),
+        # ── L1: document layer ──
+        Tool(name="doc_ingest", description="Ingest a document (.md/.txt/.epub). Returns quickly; vector indexing and graph extraction run in background.", inputSchema={"type": "object", "properties": {"file_path": {"type": "string", "description": "Absolute path to the document file"}, "title": {"type": "string", "description": "Optional title override"}, "author": {"type": "string", "description": "Optional author"}}}),
+        Tool(name="search_chunks", description="Search document chunks using hybrid FTS5 + LIKE + vector search", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "top_n": {"type": "integer", "default": 5, "description": "Number of results"}}}),
+        # ── L2: knowledge graph layer ──
+        Tool(name="search_entities", description="Search entities by name (fuzzy match + aliases)", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Entity name to search"}}}),
+        Tool(name="entity_get", description="Get entity details: type, aliases, books, key relations, related insights, footprint", inputSchema={"type": "object", "properties": {"name": {"type": "string", "description": "Entity canonical name"}}}),
+        Tool(name="graph_navigate", description="Navigate knowledge graph from an entity: anchored edges + exploration edges, with path trace and depth support", inputSchema={"type": "object", "properties": {"seed": {"type": "string", "description": "Starting entity name"}, "depth": {"type": "integer", "default": 1, "description": "Hops from seed (1=neighbors only, 2=two-hop path)"}}}),
+        Tool(name="connect", description="Find shortest path between two entities in the knowledge graph (BFS)", inputSchema={"type": "object", "properties": {"from": {"type": "string", "description": "Starting entity"}, "to": {"type": "string", "description": "Target entity"}}}),
+        # ── L3: insight layer ──
+        Tool(name="insight_record", description="Record an insight; auto-extracts entities and links to L2 in background", inputSchema={"type": "object", "properties": {"title": {"type": "string"}, "content": {"type": "string"}}}),
         Tool(name="insight_list", description="List recent insights", inputSchema={"type": "object", "properties": {"limit": {"type": "integer", "default": 20}}}),
+        Tool(name="search_insights", description="Search insights by title and content", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "top_n": {"type": "integer", "default": 5, "description": "Number of results"}}}),
+        # ── Meta ──
+        Tool(name="graph_stats", description="Get graph statistics: doc count, entity count, relation count, insight count", inputSchema={"type": "object", "properties": {}}),
     ]
 
 
@@ -165,23 +163,30 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
         chunk_ids.append(cid)
         chunk_count += 1
 
-    # Vector indexing (if embedding provider configured)
-    vec_count = 0
-    emb_provider = create_embedding_provider(config.embedding)
-    if emb_provider:
-        try:
-            vec_count = await index_vectors(db, emb_provider, chunk_ids)
-        except Exception as e:
-            print(f"[spiderweb] vector indexing failed for doc #{doc_id} '{title}': {e}", file=sys.stderr)
-
     db.commit()
+    print(f"[spiderweb] doc_ingest: #{doc_id} '{title}' — {chunk_count} chunks ingested", file=sys.stderr)
 
-    # Auto graph_build: extract entities + relations from the just-ingested doc
-    graph_result = None
-    try:
-        graph_result = await build_graph(db, config, doc_ids=[doc_id])
-    except Exception as e:
-        print(f"[spiderweb] auto graph_build failed for doc #{doc_id} '{title}': {e}", file=sys.stderr)
+    # Kick off slow ops in background (vector indexing + graph_build)
+    import asyncio as _asyncio
+
+    async def _bg_vector_and_graph():
+        """Background: vector indexing then graph_build. Non-fatal."""
+        vec_count = 0
+        emb_provider = create_embedding_provider(config.embedding)
+        if emb_provider:
+            try:
+                vec_count = await index_vectors(db, emb_provider, chunk_ids)
+                print(f"[spiderweb] doc_ingest #{doc_id}: {vec_count} vectors indexed", file=sys.stderr)
+            except Exception as e:
+                print(f"[spiderweb] doc_ingest #{doc_id}: vector indexing failed: {e}", file=sys.stderr)
+
+        try:
+            graph_result = await build_graph(db, config, doc_ids=[doc_id])
+            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build done — {graph_result.get('entities_found', 0)} entities", file=sys.stderr)
+        except Exception as e:
+            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build failed: {e}", file=sys.stderr)
+
+    _asyncio.create_task(_bg_vector_and_graph())
 
     return [TextContent(type="text", text=_json_result({
         "ok": True,
@@ -189,9 +194,9 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
         "title": title,
         "author": author,
         "chunks": chunk_count,
-        "vectors": vec_count,
+        "vectors": "pending",
+        "graph": "pending",
         "replaced": replaced,
-        "graph": graph_result,
     }))]
 
 
