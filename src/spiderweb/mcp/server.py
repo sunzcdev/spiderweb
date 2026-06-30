@@ -180,29 +180,29 @@ async def _doc_ingest(db, config: DomainConfig, args, progress=None) -> list[Tex
 
     await _p(0.1, f"段落索引完成：{chunk_count} 段")
 
-    # Vector indexing (if embedding provider configured)
-    vec_count = 0
-    emb_provider = create_embedding_provider(config.embedding)
-    if emb_provider:
-        await _p(0.15, f"开始向量化：{chunk_count} 段...")
-        try:
-            vec_count = await index_vectors(db, emb_provider, chunk_ids)
-            print(f"[spiderweb] doc_ingest #{doc_id}: {vec_count} vectors indexed", file=sys.stderr)
-        except Exception as e:
-            print(f"[spiderweb] doc_ingest #{doc_id}: vector indexing failed: {e}", file=sys.stderr)
-
     db.commit()
-    await _p(0.5, "向量化完成，开始建网...")
+    print(f"[spiderweb] doc_ingest: #{doc_id} '{title}' — {chunk_count} chunks ingested (L1 done)", file=sys.stderr)
 
-    # Auto graph_build: extract entities + relations from the just-ingested doc
-    graph_result = None
-    try:
-        graph_result = await build_graph(db, config, doc_ids=[doc_id])
-        await _p(0.95, f"建网完成：{graph_result.get('entities_found', 0)} 实体 / {graph_result.get('relations_added', 0)} 关系")
-        print(f"[spiderweb] doc_ingest #{doc_id}: graph_build done — {graph_result.get('entities_found', 0)} entities", file=sys.stderr)
-    except Exception as e:
-        await _p(0.95, "建网失败（书已入库，可稍后重建）")
-        print(f"[spiderweb] doc_ingest #{doc_id}: graph_build failed: {e}", file=sys.stderr)
+    # Background: vector indexing + graph_build (don't block the response)
+    import asyncio as _asyncio
+
+    async def _bg_vector_and_graph():
+        vec_count = 0
+        emb_provider = create_embedding_provider(config.embedding)
+        if emb_provider:
+            try:
+                vec_count = await index_vectors(db, emb_provider, chunk_ids)
+                print(f"[spiderweb] doc_ingest #{doc_id}: {vec_count} vectors indexed", file=sys.stderr)
+            except Exception as e:
+                print(f"[spiderweb] doc_ingest #{doc_id}: vector indexing failed: {e}", file=sys.stderr)
+
+        try:
+            graph_result = await build_graph(db, config, doc_ids=[doc_id])
+            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build done — {graph_result.get('entities_found', 0)} entities", file=sys.stderr)
+        except Exception as e:
+            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build failed: {e}", file=sys.stderr)
+
+    _asyncio.create_task(_bg_vector_and_graph())
 
     return [TextContent(type="text", text=_json_result({
         "ok": True,
@@ -210,8 +210,8 @@ async def _doc_ingest(db, config: DomainConfig, args, progress=None) -> list[Tex
         "title": title,
         "author": author,
         "chunks": chunk_count,
-        "vectors": vec_count,
-        "graph": graph_result,
+        "vectors": 0,
+        "graph": None,
         "replaced": replaced,
     }))]
 
