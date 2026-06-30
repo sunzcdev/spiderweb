@@ -242,6 +242,7 @@ async def _doc_ingest(db, config: DomainConfig, args, progress=None, session=Non
 
     return [TextContent(type="text", text=_json_result({
         "ok": True,
+        "task_id": task_id,
         "doc_id": doc_id,
         "title": title,
         "author": author,
