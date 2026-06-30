@@ -334,13 +334,37 @@ async def _doc_get(db, args) -> list[TextContent]:
 
 async def _relation_set(db, args) -> list[TextContent]:
     source_docs = json.dumps(args.get("source_docs", []), ensure_ascii=False)
-    db.execute(
-        "INSERT OR REPLACE INTO relations (entity_a, entity_b, relation_type, weight, source_docs_json, first_seen, last_seen) "
-        "VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
-        (args["entity_a"], args["entity_b"], args["relation_type"], args.get("weight", 1.0), source_docs)
-    )
-    db.execute("INSERT OR IGNORE INTO entity_traces (entity_name, source, last_seen) VALUES (?, 'relation_set', datetime('now'))", (args["entity_a"],))
-    db.execute("INSERT OR IGNORE INTO entity_traces (entity_name, source, last_seen) VALUES (?, 'relation_set', datetime('now'))", (args["entity_b"],))
+    weight = args.get("weight", 1.0)
+    a, b, rtype = args["entity_a"], args["entity_b"], args["relation_type"]
+
+    # ON CONFLICT: merge source_docs and update weight/last_seen, preserve first_seen
+    existing = db.execute(
+        "SELECT id, source_docs_json FROM relations WHERE entity_a = ? AND entity_b = ? AND relation_type = ?",
+        (a, b, rtype)
+    ).fetchone()
+
+    if existing:
+        # Merge source docs
+        try:
+            old_docs = json.loads(existing[1] or "[]")
+            new_docs = json.loads(source_docs)
+            merged = json.dumps(list(set(old_docs + new_docs)), ensure_ascii=False)
+        except (json.JSONDecodeError, TypeError):
+            merged = source_docs if source_docs != "[]" else existing[1]
+
+        db.execute(
+            "UPDATE relations SET weight = ?, source_docs_json = ?, last_seen = datetime('now') WHERE id = ?",
+            (weight, merged, existing[0])
+        )
+    else:
+        db.execute(
+            "INSERT INTO relations (entity_a, entity_b, relation_type, weight, source_docs_json, first_seen, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+            (a, b, rtype, weight, source_docs)
+        )
+
+    db.execute("INSERT OR IGNORE INTO entity_traces (entity_name, source, last_seen) VALUES (?, 'relation_set', datetime('now'))", (a,))
+    db.execute("INSERT OR IGNORE INTO entity_traces (entity_name, source, last_seen) VALUES (?, 'relation_set', datetime('now'))", (b,))
     db.commit()
     return [TextContent(type="text", text=_json_result({"ok": True}))]
 
@@ -395,13 +419,22 @@ async def _graph_navigate(db, config: DomainConfig, args) -> list[TextContent]:
         else:
             exploration.append(entry)
 
-    # Record trace
+    # Record trace for seed entity
     db.execute(
         "INSERT INTO entity_traces (entity_name, source, count, last_seen) "
         "VALUES (?, 'navigate', 1, datetime('now')) "
         "ON CONFLICT(entity_name, source) DO UPDATE SET count = count + 1, last_seen = datetime('now')",
         (name,)
     )
+    # Record traces for neighbor entities too (footprints)
+    for entry in anchored + exploration:
+        neighbor = entry["neighbor"]
+        db.execute(
+            "INSERT INTO entity_traces (entity_name, source, count, last_seen) "
+            "VALUES (?, 'navigate', 1, datetime('now')) "
+            "ON CONFLICT(entity_name, source) DO UPDATE SET count = count + 1, last_seen = datetime('now')",
+            (neighbor,)
+        )
     db.commit()
 
     return [TextContent(type="text", text=_json_result({

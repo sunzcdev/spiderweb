@@ -50,6 +50,9 @@ relation_types:
       - [person, INFLUENCED_BY, person]
       - [work, INFLUENCED_BY, work]
       - [concept, INFLUENCED_BY, concept]
+      - [person, INFLUENCED_BY, concept]
+      - [event, INFLUENCED_BY, event]
+      - [event, INFLUENCED_BY, person]
   DERIVES_FROM:
     label: "源自"
     weight: 5

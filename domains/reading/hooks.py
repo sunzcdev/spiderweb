@@ -26,14 +26,15 @@ class ReadingHooks(DomainHooks):
 
 def _clean_epub_artifacts(text: str, meta: dict) -> str:
     """Strip common EPUB/calibre artifacts."""
-    # Remove calibre HTML class markers
-    text = re.sub(r'\{\.calibre\d+\}', '', text)
-    # Remove ISBN metadata lines
-    text = re.sub(r'(?im)^ISBN[:\s].*$', '', text)
-    # Remove empty links
-    text = re.sub(r'\[\]\(.*?\)', '', text)
-    # Remove Telegram ad patterns
-    text = re.sub(r'(?i)(?:关注|加入).{0,20}(?:频道|群组|telegram).{0,50}', '', text)
+    # calibre HTML class markers: {.calibreN}, {.calibreNN}
+    text = re.sub(r'(?i)\{\.calibre\d+\}', '', text)
+    # ISBN / word-count metadata lines
+    text = re.sub(r'(?im)^(?:ISBN|字数|Word Count)[:\s].*$', '', text)
+    # Image references: ![alt](...) and empty links [](#...)
+    text = re.sub(r'(?i)!\[.*?\]\(.*?\)', '', text)
+    text = re.sub(r'(?i)\[\]\(.*?\)', '', text)
+    # Telegram / channel subscription ads
+    text = re.sub(r'(?im)(?:关注|加入|订阅)\s*.{0,30}(?:频道|群组|telegram|公众号).{0,80}', '', text)
     return text
 
 
