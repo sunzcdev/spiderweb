@@ -6,7 +6,7 @@ import time
 import argparse
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent, ProgressNotification
+from mcp.types import Tool, TextContent, ProgressNotification, TaskStatusNotification
 
 from ..engine.db import get_db, get_db_path
 from ..debug import init as debug_init, tool_call as debug_call, tool_result as debug_result, tool_error as debug_error
@@ -18,6 +18,7 @@ from ..engine.providers import create_llm_provider, create_embedding_provider, c
 
 server = Server("spiderweb")
 _config: DomainConfig = None
+_tasks: dict = {}  # task_id -> {status, progress_pct, stage, result?, error?}
 
 
 def get_config() -> DomainConfig:
@@ -50,6 +51,7 @@ async def list_tools():
         Tool(name="insight_list", description="List recent insights", inputSchema={"type": "object", "properties": {"limit": {"type": "integer", "default": 20}}}),
         Tool(name="search_insights", description="Search insights by title and content", inputSchema={"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "top_n": {"type": "integer", "default": 5, "description": "Number of results"}}}),
         # ── Meta ──
+        Tool(name="task_status", description="Check progress of a background task (e.g. doc_ingest vectors/graph build)", inputSchema={"type": "object", "properties": {"task_id": {"type": "string", "description": "Task ID from doc_ingest response"}}}),
         Tool(name="graph_stats", description="Get graph statistics: doc count, entity count, relation count, insight count", inputSchema={"type": "object", "properties": {}}),
     ]
 
@@ -86,7 +88,8 @@ async def call_tool(name: str, arguments: dict, context=None):
         elif name == "search_insights":
             result = await _search_insights(db, arguments)
         elif name == "doc_ingest":
-            result = await _doc_ingest(db, config, arguments, progress)
+            session = context.session if context else None
+            result = await _doc_ingest(db, config, arguments, progress, session)
         elif name == "doc_get":
             result = await _doc_get(db, arguments)
         elif name == "doc_delete":
@@ -107,6 +110,8 @@ async def call_tool(name: str, arguments: dict, context=None):
             result = await _entity_get(db, arguments)
         elif name == "connect":
             result = await _connect(db, arguments)
+        elif name == "task_status":
+            result = await _task_status(db, arguments)
         elif name == "insight_list":
             result = await _insight_list(db, arguments)
         else:
@@ -123,7 +128,7 @@ async def call_tool(name: str, arguments: dict, context=None):
 
 # === Tool implementations ===
 
-async def _doc_ingest(db, config: DomainConfig, args, progress=None) -> list[TextContent]:
+async def _doc_ingest(db, config: DomainConfig, args, progress=None, session=None) -> list[TextContent]:
     file_path = os.path.expanduser(args["file_path"])
     title_override = args.get("title", "")
     author_override = args.get("author", "")
@@ -181,25 +186,56 @@ async def _doc_ingest(db, config: DomainConfig, args, progress=None) -> list[Tex
     await _p(0.1, f"段落索引完成：{chunk_count} 段")
 
     db.commit()
-    print(f"[spiderweb] doc_ingest: #{doc_id} '{title}' — {chunk_count} chunks ingested (L1 done)", file=sys.stderr)
+    task_id = f"ingest_{doc_id}"
+    _tasks[task_id] = {"status": "running", "progress_pct": 5, "stage": "L1完成", "title": title}
 
-    # Background: vector indexing + graph_build (don't block the response)
+    print(f"[spiderweb] doc_ingest: #{doc_id} '{title}' — {chunk_count} chunks ingested (L1 done, bg started)", file=sys.stderr)
+
+    # Background: vector indexing + graph_build
     import asyncio as _asyncio
 
     async def _bg_vector_and_graph():
+        async def _notify(pct, stage, detail=""):
+            _tasks[task_id] = {"status": "running", "progress_pct": pct, "stage": stage, "title": title, "detail": detail}
+            if session:
+                try:
+                    await session.send_notification(TaskStatusNotification(
+                        params={"data": {"task_id": task_id, "title": title, "progress_pct": pct, "stage": stage, "detail": detail}}
+                    ))
+                except Exception:
+                    pass
+
+        await _notify(10, "向量化中...", f"0/{chunk_count}")
+
         vec_count = 0
         emb_provider = create_embedding_provider(config.embedding)
         if emb_provider:
             try:
                 vec_count = await index_vectors(db, emb_provider, chunk_ids)
+                await _notify(50, "向量化完成", f"{vec_count} 个向量")
                 print(f"[spiderweb] doc_ingest #{doc_id}: {vec_count} vectors indexed", file=sys.stderr)
             except Exception as e:
                 print(f"[spiderweb] doc_ingest #{doc_id}: vector indexing failed: {e}", file=sys.stderr)
 
         try:
+            await _notify(60, "建网中...", "LLM 提取实体和关系")
             graph_result = await build_graph(db, config, doc_ids=[doc_id])
-            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build done — {graph_result.get('entities_found', 0)} entities", file=sys.stderr)
+            ef = graph_result.get('entities_found', 0)
+            ra = graph_result.get('relations_added', 0)
+            _tasks[task_id] = {"status": "completed", "progress_pct": 100, "stage": "完成",
+                               "title": title, "entities": ef, "relations": ra}
+            if session:
+                try:
+                    await session.send_notification(TaskStatusNotification(
+                        params={"data": {"task_id": task_id, "title": title, "progress_pct": 100,
+                                         "stage": "完成", "entities": ef, "relations": ra}}
+                    ))
+                except Exception:
+                    pass
+            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build done — {ef} entities", file=sys.stderr)
         except Exception as e:
+            _tasks[task_id] = {"status": "failed", "progress_pct": 90, "stage": "建网失败",
+                               "title": title, "error": str(e)}
             print(f"[spiderweb] doc_ingest #{doc_id}: graph_build failed: {e}", file=sys.stderr)
 
     _asyncio.create_task(_bg_vector_and_graph())
@@ -646,6 +682,14 @@ async def _connect(db, args) -> list[TextContent]:
                 queue.append((neighbor, path + [neighbor]))
 
     return [TextContent(type="text", text=_json_result({"path": [], "error": "no path found"}))]
+
+
+async def _task_status(db, args) -> list[TextContent]:
+    task_id = args["task_id"]
+    task = _tasks.get(task_id)
+    if not task:
+        return [TextContent(type="text", text=_json_result({"error": "not_found", "task_id": task_id}))]
+    return [TextContent(type="text", text=_json_result(task))]
 
 
 async def _insight_record(db, config: DomainConfig, args, progress=None) -> list[TextContent]:
