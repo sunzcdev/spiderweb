@@ -166,6 +166,13 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
 
     db.commit()
 
+    # Auto graph_build: extract entities + relations from the just-ingested doc
+    graph_result = None
+    try:
+        graph_result = await build_graph(db, config, doc_ids=[doc_id])
+    except Exception:
+        pass  # non-fatal: doc ingested, can build graph later
+
     return [TextContent(type="text", text=_json_result({
         "ok": True,
         "doc_id": doc_id,
@@ -173,6 +180,7 @@ async def _doc_ingest(db, config: DomainConfig, args) -> list[TextContent]:
         "author": author,
         "chunks": chunk_count,
         "vectors": vec_count,
+        "graph": graph_result,
     }))]
 
 
