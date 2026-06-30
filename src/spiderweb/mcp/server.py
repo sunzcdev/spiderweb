@@ -44,11 +44,13 @@ async def list_tools():
         Tool(name="doc_get", description="Get document chunk content by chunk ID", inputSchema={"type": "object", "properties": {"chunk_id": {"type": "integer", "description": "Chunk ID to retrieve"}}}),
         Tool(name="relation_set", description="Create or update a relation between two entities", inputSchema={"type": "object", "properties": {"entity_a": {"type": "string"}, "entity_b": {"type": "string"}, "relation_type": {"type": "string"}, "weight": {"type": "number", "default": 1.0}, "source_docs": {"type": "array", "items": {"type": "string"}, "description": "Optional source document titles"}}}),
         Tool(name="relation_list", description="List all relations for an entity", inputSchema={"type": "object", "properties": {"entity_name": {"type": "string"}}}),
-        Tool(name="graph_navigate", description="Navigate from an entity: single-step expansion, returns anchored and exploration edges", inputSchema={"type": "object", "properties": {"seed": {"type": "string", "description": "Starting entity name"}, "mode": {"type": "string", "enum": ["explore", "focus"], "default": "explore"}}}),
+        Tool(name="graph_navigate", description="Navigate knowledge graph from an entity: anchored edges + exploration edges, with path trace and depth support", inputSchema={"type": "object", "properties": {"seed": {"type": "string", "description": "Starting entity name"}, "depth": {"type": "integer", "default": 1, "description": "Hops from seed (1=neighbors only, 2=two-hop path)"}, "mode": {"type": "string", "enum": ["explore", "focus"], "default": "explore"}}}),
         Tool(name="doc_ingest", description="Ingest a document into L1: accepts .md, .txt, .epub files", inputSchema={"type": "object", "properties": {"file_path": {"type": "string", "description": "Absolute path to the document file"}, "title": {"type": "string", "description": "Optional title override"}, "author": {"type": "string", "description": "Optional author"}}}),
         Tool(name="graph_build", description="Build/extend the knowledge graph by extracting entities and relations from ingested documents using LLM", inputSchema={"type": "object", "properties": {"doc_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional list of doc IDs to process. If empty, processes all docs."}}}),
         Tool(name="entity_register", description="Manually register an entity in the knowledge graph", inputSchema={"type": "object", "properties": {"name": {"type": "string", "description": "Canonical entity name"}, "entity_type": {"type": "string", "description": "Entity type"}, "aliases": {"type": "array", "items": {"type": "string"}, "description": "Optional aliases"}, "description": {"type": "string", "description": "Optional description"}}}),
         Tool(name="insight_record", description="Record an insight/note with optional source docs and entities", inputSchema={"type": "object", "properties": {"title": {"type": "string"}, "content": {"type": "string"}, "source_docs": {"type": "array", "items": {"type": "string"}, "description": "Optional list of doc titles"}}}),
+        Tool(name="entity_get", description="Get entity details: type, aliases, description, key relations, related insights, footprint", inputSchema={"type": "object", "properties": {"name": {"type": "string", "description": "Entity canonical name"}}}),
+        Tool(name="connect", description="Find shortest path between two entities in the knowledge graph", inputSchema={"type": "object", "properties": {"from": {"type": "string", "description": "Starting entity"}, "to": {"type": "string", "description": "Target entity"}}}),
         Tool(name="insight_list", description="List recent insights", inputSchema={"type": "object", "properties": {"limit": {"type": "integer", "default": 20}}}),
     ]
 
@@ -90,6 +92,10 @@ async def call_tool(name: str, arguments: dict):
             result = await _graph_navigate(db, config, arguments)
         elif name == "insight_record":
             result = await _insight_record(db, config, arguments)
+        elif name == "entity_get":
+            result = await _entity_get(db, arguments)
+        elif name == "connect":
+            result = await _connect(db, arguments)
         elif name == "insight_list":
             result = await _insight_list(db, arguments)
         else:
@@ -390,6 +396,7 @@ async def _relation_list(db, args) -> list[TextContent]:
 
 async def _graph_navigate(db, config: DomainConfig, args) -> list[TextContent]:
     seed = args["seed"]
+    depth = args.get("depth", 1)
     mode = args.get("mode", "explore")
 
     # Resolve seed
@@ -400,55 +407,57 @@ async def _graph_navigate(db, config: DomainConfig, args) -> list[TextContent]:
         return [TextContent(type="text", text=_json_result({"error": "not_found", "seed": seed}))]
 
     name, etype = row
+    path_trace = [name]
 
-    # Get edges sorted by weight
-    edges = db.execute(
-        "SELECT entity_a, entity_b, relation_type, weight FROM relations "
-        "WHERE entity_a = ? OR entity_b = ? ORDER BY weight DESC",
-        (name, name)
-    ).fetchall()
+    def _expand(entity_name):
+        edges = db.execute(
+            "SELECT entity_a, entity_b, relation_type, weight FROM relations "
+            "WHERE entity_a = ? OR entity_b = ? ORDER BY weight DESC",
+            (entity_name, entity_name)
+        ).fetchall()
+        anc, exp = [], []
+        for a, b, rtype, weight in edges:
+            neighbor = b if a == entity_name else a
+            entry = {"neighbor": neighbor, "relation": rtype, "weight": weight}
+            has_entry = db.execute("SELECT 1 FROM entities WHERE canonical_name = ?", (neighbor,)).fetchone()
+            if has_entry and weight >= 1.0:
+                anc.append(entry)
+            else:
+                exp.append(entry)
+        return anc, exp
 
-    # Classify into anchored vs exploration
-    rel_weights = config.relation_types
-    anchored = []
-    exploration = []
+    anchored, exploration = _expand(name)
 
-    for a, b, rtype, weight in edges:
-        neighbor = b if a == name else a
-        entry = {"neighbor": neighbor, "relation": rtype, "weight": weight}
+    # Depth=2: treat top anchored neighbor as next hop
+    if depth >= 2 and anchored:
+        next_hop = anchored[0]["neighbor"]
+        path_trace.append(next_hop)
+        anc2, exp2 = _expand(next_hop)
+        anchored = [{"neighbor": n["neighbor"], "relation": f"{name}→{next_hop}→", "weight": n["weight"]} for n in anc2[:10]]
+        exploration = exploration[:10] + exp2[:10]
 
-        # Check if neighbor is a known entity (has entries in entities table)
-        has_entry = db.execute("SELECT 1 FROM entities WHERE canonical_name = ?", (neighbor,)).fetchone()
-
-        if has_entry and weight >= 1.0:
-            anchored.append(entry)
-        else:
-            exploration.append(entry)
-
-    # Record trace for seed entity
-    db.execute(
-        "INSERT INTO entity_traces (entity_name, source, count, last_seen) "
-        "VALUES (?, 'navigate', 1, datetime('now')) "
-        "ON CONFLICT(entity_name, source) DO UPDATE SET count = count + 1, last_seen = datetime('now')",
-        (name,)
-    )
-    # Record traces for neighbor entities too (footprints)
-    for entry in anchored + exploration:
-        neighbor = entry["neighbor"]
-        db.execute(
-            "INSERT INTO entity_traces (entity_name, source, count, last_seen) "
-            "VALUES (?, 'navigate', 1, datetime('now')) "
-            "ON CONFLICT(entity_name, source) DO UPDATE SET count = count + 1, last_seen = datetime('now')",
-            (neighbor,)
-        )
-    db.commit()
+    # Record footprints
+    _record_trace(db, name)
+    for entry in anchored[:15] + exploration[:20]:
+        _record_trace(db, entry["neighbor"])
 
     return [TextContent(type="text", text=_json_result({
         "position": {"entity": name, "type": etype},
         "anchored": anchored[:15],
         "exploration": exploration[:20],
+        "path_trace": path_trace,
         "is_end": len(anchored) == 0 and len(exploration) == 0
     }))]
+
+
+def _record_trace(db, entity_name):
+    """Record one footprint for an entity."""
+    db.execute(
+        "INSERT INTO entity_traces (entity_name, source, count, last_seen) "
+        "VALUES (?, 'navigate', 1, datetime('now')) "
+        "ON CONFLICT(entity_name, source) DO UPDATE SET count = count + 1, last_seen = datetime('now')",
+        (entity_name,)
+    )
 
 
 def _record_query_history(db, query: str, tool_name: str, results: list[dict]):
@@ -458,6 +467,102 @@ def _record_query_history(db, query: str, tool_name: str, results: list[dict]):
         (query, tool_name, json.dumps(results, ensure_ascii=False))
     )
     db.commit()
+
+
+async def _entity_get(db, args) -> list[TextContent]:
+    """Get entity detail: type, aliases, description, key relations, related insights, footprint."""
+    name = args["name"].strip()
+    row = db.execute(
+        "SELECT canonical_name, entity_type, aliases_json, description, source, cross_doc_count "
+        "FROM entities WHERE canonical_name = ?", (name,)
+    ).fetchone()
+    if not row:
+        return [TextContent(type="text", text=_json_result({"error": "not_found", "name": name}))]
+
+    # Top relations (by weight)
+    relations = db.execute(
+        "SELECT entity_a, entity_b, relation_type, weight FROM relations "
+        "WHERE entity_a = ? OR entity_b = ? ORDER BY weight DESC LIMIT 20",
+        (name, name)
+    ).fetchall()
+    key_relations = []
+    for a, b, rtype, w in relations:
+        neighbor = b if a == name else a
+        key_relations.append({"entity": neighbor, "relation": rtype, "weight": w})
+
+    # Related insights (via entities_json)
+    insights = db.execute(
+        "SELECT slug, title FROM insights WHERE entities_json LIKE ? LIMIT 10",
+        (f"%{name}%",)
+    ).fetchall()
+    related_insights = [{"slug": r[0], "title": r[1]} for r in insights]
+
+    # Footprint
+    trace = db.execute(
+        "SELECT source, count, last_seen FROM entity_traces WHERE entity_name = ?", (name,)
+    ).fetchall()
+    footprint = [{"source": t[0], "count": t[1], "last_seen": t[2]} for t in trace]
+
+    # Books this entity appears in
+    books = db.execute(
+        "SELECT DISTINCT d.title FROM chunks c JOIN docs d ON c.doc_id = d.id "
+        "WHERE c.body LIKE ? LIMIT 10", (f"%{name}%",)
+    ).fetchall()
+    book_list = [b[0] for b in books]
+
+    return [TextContent(type="text", text=_json_result({
+        "name": row[0], "type": row[1],
+        "aliases": json.loads(row[2] or "[]"),
+        "description": row[3], "source": row[4],
+        "cross_doc_count": row[5],
+        "books": book_list,
+        "key_relations": key_relations,
+        "related_insights": related_insights,
+        "footprint": footprint,
+    }))]
+
+
+async def _connect(db, args) -> list[TextContent]:
+    """BFS shortest path between two entities in the knowledge graph."""
+    start = args["from"].strip()
+    end = args["to"].strip()
+
+    # Verify both exist
+    a = db.execute("SELECT 1 FROM entities WHERE canonical_name = ?", (start,)).fetchone()
+    b = db.execute("SELECT 1 FROM entities WHERE canonical_name = ?", (end,)).fetchone()
+    if not a:
+        return [TextContent(type="text", text=_json_result({"error": "not_found", "entity": start}))]
+    if not b:
+        return [TextContent(type="text", text=_json_result({"error": "not_found", "entity": end}))]
+    if start == end:
+        return [TextContent(type="text", text=_json_result({"path": [start], "length": 0}))]
+
+    # Build adjacency list from relations
+    adj = {}
+    for row in db.execute("SELECT entity_a, entity_b, relation_type FROM relations").fetchall():
+        adj.setdefault(row[0], []).append((row[1], row[2]))
+        adj.setdefault(row[1], []).append((row[0], row[2]))
+
+    if start not in adj:
+        return [TextContent(type="text", text=_json_result({"path": [], "error": "no connections from start"}))]
+
+    # BFS
+    from collections import deque
+    queue = deque([(start, [start])])
+    visited = {start}
+
+    while queue:
+        node, path = queue.popleft()
+        for neighbor, rtype in adj.get(node, []):
+            if neighbor == end:
+                return [TextContent(type="text", text=_json_result({
+                    "path": path + [neighbor], "length": len(path)
+                }))]
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append((neighbor, path + [neighbor]))
+
+    return [TextContent(type="text", text=_json_result({"path": [], "error": "no path found"}))]
 
 
 async def _insight_record(db, config: DomainConfig, args) -> list[TextContent]:
@@ -508,12 +613,25 @@ async def _insight_record(db, config: DomainConfig, args) -> list[TextContent]:
     except Exception as e:
         link_result = {"error": str(e)}
 
+    # Linked books (from source_docs + entity traces)
+    linked_books = list(set(source_docs or []))
+    if link_result and "entity_names" in link_result:
+        for name in link_result["entity_names"]:
+            doc_rows = db.execute(
+                "SELECT DISTINCT d.title FROM chunks c JOIN docs d ON c.doc_id = d.id "
+                "WHERE c.body LIKE ? LIMIT 3", (f"%{name}%",)
+            ).fetchall()
+            for (dt,) in doc_rows:
+                if dt not in linked_books:
+                    linked_books.append(dt)
+
     db.commit()
     return [TextContent(type="text", text=_json_result({
         "ok": True,
         "slug": slug,
         "insight_id": insight_id,
         "linked": link_result,
+        "linked_books": linked_books[:10],
         "vectors": vec_count,
     }))]
 
