@@ -21,19 +21,21 @@ def sample_chunks(db, doc_ids: list[int], mode: str, sample_rate: float) -> list
     if not rows:
         return []
 
-    if mode == "full":
-        return rows
+    MAX_CHUNKS = 30  # old reading-graph limit — keeps extraction fast
 
-    # Sample mode: sqrt(total_chars) * sample_rate
+    if mode == "full":
+        return rows[:MAX_CHUNKS]
+
+    # Sample mode: sqrt(total_chars) * sample_rate, capped
     total_chars = sum(len(r[1]) for r in rows)
     target = max(10, int(math.sqrt(total_chars) * sample_rate))
     if target >= len(rows):
-        return rows
+        return rows[:MAX_CHUNKS]
 
     # Even sampling
     step = len(rows) / target
     sampled = [rows[int(i * step)] for i in range(target)]
-    return sampled
+    return sampled[:MAX_CHUNKS]
 
 
 async def build_graph(
