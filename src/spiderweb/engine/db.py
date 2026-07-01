@@ -124,6 +124,24 @@ def get_db(db_path: str) -> _NoClose:
         return _conn
 
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
+
+    # Auto-recover from crashed process: clean stale WAL files
+    wal_path = db_path + "-wal"
+    shm_path = db_path + "-shm"
+    if os.path.exists(wal_path) or os.path.exists(shm_path):
+        db_mtime = os.path.getmtime(db_path) if os.path.exists(db_path) else 0
+        wal_mtime = max(
+            os.path.getmtime(wal_path) if os.path.exists(wal_path) else 0,
+            os.path.getmtime(shm_path) if os.path.exists(shm_path) else 0,
+        )
+        # If WAL is > 120s newer than DB, the last write crashed — clean up
+        if wal_mtime - db_mtime > 120:
+            for p in [wal_path, shm_path]:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
