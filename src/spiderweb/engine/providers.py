@@ -47,8 +47,8 @@ class OpenAILLM(LLMProvider):
         response = await client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=kwargs.get("temperature", self.temperature),
-            max_tokens=kwargs.get("max_tokens", 8192),  # v4 reasoning models need headroom
+            temperature=kwargs.get("temperature", 0.0),
+            response_format={"type": "json_object"},  # constrained JSON decoding — much faster
         )
         return response.choices[0].message.content
 

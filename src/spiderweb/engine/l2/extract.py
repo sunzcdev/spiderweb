@@ -8,27 +8,15 @@ from ..providers import LLMProvider
 from ..domain import DomainConfig, get_entity_types_flat
 from ..hooks import run_validators
 
-BATCH_TIMEOUT_S = 90     # per LLM call
-OVERALL_TIMEOUT_S = 600  # entire extraction
+BATCH_TIMEOUT_S = 30     # per LLM call
+OVERALL_TIMEOUT_S = 300  # entire extraction
 
 
 async def _backoff(attempt: int):
     """Exponential backoff: 0.5s, 1s, 2s."""
     await asyncio.sleep(0.5 * (2 ** attempt))
 
-EXTRACT_SYSTEM = """You extract structured knowledge from text. Output ONLY valid JSON.
-
-Given a text passage, extract:
-1. entities: list of {{"name": "canonical name", "type": "entity_type", "aliases": ["other names"], "description": "one sentence in the source language"}}
-2. relations: list of {{"entity_a": "name", "entity_b": "name", "relation_type": "REL_TYPE"}}
-
-Rules:
-- Canonical names should be the most standard form (e.g., "Confucius" not "Kong Qiu")
-- Entity types must be from the provided list
-- Relation types must be from the provided list
-- Only extract entities and relations that are EXPLICITLY mentioned in the text
-- Do NOT invent entities or relations not supported by the text
-- Merge co-referring entities (same person/concept with different names → use aliases)"""
+EXTRACT_SYSTEM = """你从中文文本中提取知识图谱。文本含多个段落（用---分隔）。输出 JSON: {"entities":[{"name":"实体名","type":"类型","aliases":["别名"],"description":"一句话描述"}],"relations":[{"entity_a":"","entity_b":"","relation_type":""}]}。只提取明确出现的实体。"""
 
 EXTRACT_USER = """Entity types available:
 {entity_types}
