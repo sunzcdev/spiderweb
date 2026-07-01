@@ -8,8 +8,8 @@ from ..providers import LLMProvider
 from ..domain import DomainConfig, get_entity_types_flat
 from ..hooks import run_validators
 
-BATCH_TIMEOUT_S = 30     # per LLM call
-OVERALL_TIMEOUT_S = 300  # entire extraction
+BATCH_TIMEOUT_S = 60     # per LLM call
+OVERALL_TIMEOUT_S = 600  # entire extraction
 
 
 async def _backoff(attempt: int):
@@ -112,7 +112,7 @@ async def extract_from_chunks(
 
     # deepseek-chat has 64K token context. Prompt template takes ~3K tokens.
     # Chinese: 1 token ≈ 1.5-2 chars. Safe: 40K chars ≈ 25K tokens for text.
-    MAX_CHARS_PER_CALL = 40_000
+    MAX_CHARS_PER_CALL = 20_000  # keep prompts reasonably sized
     t_start = time.time()
     batch_num = 0
     total_batches = (len(chunks) + batch_size - 1) // batch_size

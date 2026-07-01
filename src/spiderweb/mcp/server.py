@@ -234,7 +234,7 @@ async def _doc_ingest(db, config: DomainConfig, args, progress=None, session=Non
                 except Exception:
                     pass
             print(f"[spiderweb] doc_ingest #{doc_id}: graph_build done — {ef} entities", file=sys.stderr)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _tasks[task_id] = {"status": "failed", "progress_pct": 90, "stage": "建网超时",
                                "title": title, "error": "graph_build timed out"}
             print(f"[spiderweb] doc_ingest #{doc_id}: graph_build TIMEOUT", file=sys.stderr)

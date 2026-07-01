@@ -42,7 +42,7 @@ class OpenAILLM(LLMProvider):
         from openai import AsyncOpenAI
         import httpx
         key = self.api_key or os.environ.get("SPIDERWEB_LLM_API_KEY", "")
-        timeout = httpx.Timeout(30.0, connect=10.0, read=30.0, write=30.0)
+        timeout = httpx.Timeout(60.0, connect=15.0, read=60.0, write=60.0)
         client = AsyncOpenAI(api_key=key, base_url=self.base_url, timeout=timeout)
         response = await client.chat.completions.create(
             model=self.model,
