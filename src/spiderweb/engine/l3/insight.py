@@ -70,15 +70,8 @@ async def reverse_extract(
             await _backoff(attempt)
         return None
 
-    # Try primary model
+    # Try model (OpenAILLM internally handles primary → configured fallbacks)
     result = await _try_extract(llm)
-    if result is not None:
-        return result
-
-    # Fallback to deepseek-chat if primary returned empty
-    from ..providers import OpenAILLM
-    fallback = OpenAILLM(model="deepseek-chat", base_url="https://api.deepseek.com/v1")
-    result = await _try_extract(fallback)
     if result is not None:
         return result
 
@@ -188,6 +181,84 @@ def _ensure_relation(db, a: str, b: str, rtype: str, weight: float, config: Doma
         (a, b, rtype, weight)
     )
     return True
+
+
+async def write_insight(db, config, title: str, content: str, source_docs: list | None = None) -> dict:
+    """Write an insight: DB insert, FTS5, vector, entity extraction + linking.
+
+    Returns dict with slug, insight_id, entity stats, linked_books, vectors.
+    This is the engine-level write path — no progress callbacks, no MCP wrapping.
+    """
+    from ..providers import create_tokenizer_provider, create_embedding_provider
+    from ..l1.ingest import ensure_vec_table
+
+    source_docs = source_docs or []
+    slug = re.sub(r'[^a-z0-9一-鿿]+', '-', title.lower().strip())[:80]
+
+    cursor = db.execute(
+        "INSERT OR REPLACE INTO insights (slug, title, content, source_docs_json, updated_at) "
+        "VALUES (?, ?, ?, ?, datetime('now'))",
+        (slug, title, content, json.dumps(source_docs, ensure_ascii=False))
+    )
+    insight_id = cursor.lastrowid
+
+    # FTS5: write tokenized text for Chinese word segmentation
+    tokenizer = create_tokenizer_provider(config.tokenizer)
+    fts_title = tokenizer.tokenize(title) if tokenizer else title
+    fts_content = tokenizer.tokenize(content) if tokenizer else content
+    db.execute(
+        "INSERT OR REPLACE INTO insights_fts(rowid, title, content) VALUES (?, ?, ?)",
+        (insight_id, fts_title, fts_content)
+    )
+
+    # Vector: embed for semantic search
+    emb_provider = create_embedding_provider(config.embedding)
+    vec_count = 0
+    if emb_provider:
+        ensure_vec_table(db, emb_provider.dimensions, "insights_vec")
+        try:
+            vecs = await emb_provider.embed([f"{title}\n{content}"])
+            db.execute(
+                "INSERT OR REPLACE INTO insights_vec(rowid, embedding) VALUES (?, ?)",
+                (insight_id, json.dumps(vecs[0]))
+            )
+            vec_count = 1
+        except Exception:
+            pass  # non-fatal: insight stored, just no vector
+
+    # Reverse extract entities and link to L2
+    link_result = {}
+    try:
+        from ..providers import create_llm_provider
+        llm = create_llm_provider(config.llm)
+        entities, relations = await reverse_extract(llm, config, content)
+        link_result = link_insight_to_entities(db, config, insight_id, entities, relations)
+    except Exception as e:
+        link_result = {"error": str(e)}
+
+    # Linked books (from source_docs + entity traces)
+    linked_books = list(set(source_docs))
+    if link_result and "entity_names" in link_result:
+        for name in link_result["entity_names"]:
+            doc_rows = db.execute(
+                "SELECT DISTINCT d.title FROM chunks c JOIN docs d ON c.doc_id = d.id "
+                "WHERE c.body LIKE ? LIMIT 3", (f"%{name}%",)
+            ).fetchall()
+            for (dt,) in doc_rows:
+                if dt not in linked_books:
+                    linked_books.append(dt)
+
+    db.commit()
+    return {
+        "ok": True,
+        "slug": slug,
+        "insight_id": insight_id,
+        "entities_extracted": link_result.get("entities_extracted", 0),
+        "entities_registered": link_result.get("entities_registered", 0),
+        "edges_added": link_result.get("edges_added", 0),
+        "linked_books": linked_books[:10],
+        "vectors": vec_count,
+    }
 
 
 def _parse_json(text: str) -> dict | None:

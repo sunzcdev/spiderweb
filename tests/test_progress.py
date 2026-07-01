@@ -1,4 +1,4 @@
-"""Test progress notifications via direct engine call (bypass MCP stdio)."""
+"""Test ingest process via ReadingService (replaces old _doc_ingest progress test)."""
 import json
 import tempfile
 import os
@@ -6,54 +6,42 @@ import pytest
 
 
 @pytest.mark.asyncio
-@pytest.mark.integration
-async def test_doc_ingest_progress_callback():
-    """doc_ingest calls progress callback with ratio/message, returns complete result."""
-    import os
-    os.environ["SPIDERWEB_DOMAIN"] = "/home/ubuntu/projects/spiderweb/domains/reading"
-    os.environ["SPIDERWEB_LLM_API_KEY"] = "sk-02deafc15a634f0ab5f63aeec4f8f86f"
-    os.environ["SPIDERWEB_EMBEDDING_API_KEY"] = ""  # skip slow vector
-
+async def test_ingest_markdown(temp_db, reading_domain):
+    """ReadingService.ingest ingests a .md file with all steps completed."""
     from spiderweb.engine.domain import load_domain
-    from spiderweb.engine.db import get_db, get_db_path
-    from spiderweb.mcp.server import _doc_ingest, _doc_delete
-    from spiderweb.engine.db import get_db_path
+    from spiderweb.service.reading_service import ReadingService
 
-    config = load_domain(os.environ["SPIDERWEB_DOMAIN"])
-    db = get_db(get_db_path(config.data_dir))
+    config = load_domain(reading_domain["domain_dir"])
+    config.data_dir = reading_domain["data_dir"]
+    config.llm = {"driver": "openai", "model": "deepseek-chat", "base_url": "http://localhost:0"}
+    config.embedding = {"driver": "none"}
+    config.tokenizer = {"driver": "none"}
 
-    # Create tiny test doc
     with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
         f.write("# 测试书\n\n孔子曰：学而时习之，不亦说乎。\n\n孟子曰：尽信书则不如无书。\n")
         test_path = f.name
 
     try:
-        progress_msgs = []
+        svc = ReadingService(temp_db, config)
+        result = await svc.ingest(test_path)
 
-        async def progress(ratio, msg):
-            progress_msgs.append((ratio, msg))
+        assert result["ok"] is True
+        assert result["chunks"] > 0
+        assert result["doc_id"] > 0
+        assert result["title"] == "测试书"
+        assert isinstance(result["vectors"], int)
 
-        result = await _doc_ingest(db, config, {
-            "file_path": test_path,
-            "title": "TDD测试书",
-        }, progress=progress)
+        # Verify data written to DB
+        doc = temp_db.execute(
+            "SELECT title, author FROM docs WHERE id = ?", (result["doc_id"],)
+        ).fetchone()
+        assert doc is not None
+        assert doc[0] == "测试书"
 
-        data = json.loads(result[0].text)
-
-        # Assert: complete result
-        assert data["ok"] is True
-        assert isinstance(data["vectors"], int), f"vectors={data['vectors']}"
-        assert "graph" in data
-        assert data["chunks"] > 0
-
-        # Assert: progress fired
-        print(f"Progress msgs: {len(progress_msgs)}")
-        for r, m in progress_msgs:
-            print(f"  {r:.0%} — {m}")
-        assert len(progress_msgs) >= 2, f"Expected >=2 progress msgs, got {len(progress_msgs)}"
-
-        # Cleanup
-        await _doc_delete(db, {"doc_id": data["doc_id"]})
+        chunks = temp_db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE doc_id = ?", (result["doc_id"],)
+        ).fetchone()
+        assert chunks[0] == result["chunks"]
 
     finally:
         os.unlink(test_path)

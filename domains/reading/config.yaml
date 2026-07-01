@@ -13,6 +13,10 @@ providers:
     base_url: https://api.deepseek.com/v1
     driver: openai
     model: deepseek-v4-flash
+    fallback:
+      - base_url: https://token.sensenova.cn/v1
+        model: sensenova-6.7-flash-lite
+        api_key_env: SENSENOVA_API_KEY
   reranker:
     driver: voyage
     model: rerank-2-lite

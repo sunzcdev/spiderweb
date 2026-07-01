@@ -1,25 +1,21 @@
-"""Test MCP tool handlers — verify routing, return shapes, and error handling."""
+"""Test engine search functions + ReadingService (replaces old MCP handler tests)."""
 import json
 import pytest
 
 
 class TestGraphStats:
-    """RED→GREEN: graph_stats returns doc/entity/relation/insight counts."""
+    """graph_stats returns doc/entity/relation/insight counts."""
 
-    @pytest.mark.asyncio
-    async def test_empty_db(self, temp_db):
-        from spiderweb.mcp.server import _graph_stats
+    def test_empty_db(self, temp_db):
+        from spiderweb.engine.l2.search import graph_stats
+        stats = graph_stats(temp_db)
+        assert stats["docs"] == 0
+        assert stats["entities"] == 0
+        assert stats["relations"] == 0
+        assert stats["insights"] == 0
 
-        result = await _graph_stats(temp_db)
-        data = json.loads(result[0].text)
-        assert data["docs"] == 0
-        assert data["entities"] == 0
-        assert data["relations"] == 0
-        assert data["insights"] == 0
-
-    @pytest.mark.asyncio
-    async def test_with_data(self, temp_db):
-        from spiderweb.mcp.server import _graph_stats
+    def test_with_data(self, temp_db):
+        from spiderweb.engine.l2.search import graph_stats
 
         temp_db.execute("INSERT INTO docs (path, title) VALUES ('/tmp/a.md', 'A')")
         temp_db.execute("INSERT INTO entities (canonical_name) VALUES ('X')")
@@ -29,19 +25,17 @@ class TestGraphStats:
         )
         temp_db.commit()
 
-        result = await _graph_stats(temp_db)
-        data = json.loads(result[0].text)
-        assert data["docs"] == 1
-        assert data["entities"] == 2
-        assert data["relations"] == 1
+        stats = graph_stats(temp_db)
+        assert stats["docs"] == 1
+        assert stats["entities"] == 2
+        assert stats["relations"] == 1
 
 
 class TestSearchEntities:
-    """RED→GREEN: search_entities finds by name or alias."""
+    """search_entities finds by name or alias."""
 
-    @pytest.mark.asyncio
-    async def test_finds_by_canonical_name(self, temp_db):
-        from spiderweb.mcp.server import _search_entities
+    def test_finds_by_canonical_name(self, temp_db):
+        from spiderweb.engine.l2.search import search_entities
 
         temp_db.execute(
             "INSERT INTO entities (canonical_name, entity_type, aliases_json) VALUES (?, ?, ?)",
@@ -49,15 +43,13 @@ class TestSearchEntities:
         )
         temp_db.commit()
 
-        result = await _search_entities(temp_db, {"query": "康德"})
-        data = json.loads(result[0].text)
-        assert data["count"] == 1
-        assert data["results"][0]["name"] == "康德"
-        assert data["results"][0]["type"] == "person.philosopher"
+        results = search_entities(temp_db, "康德")
+        assert len(results) == 1
+        assert results[0]["name"] == "康德"
+        assert results[0]["type"] == "person.philosopher"
 
-    @pytest.mark.asyncio
-    async def test_finds_by_alias(self, temp_db):
-        from spiderweb.mcp.server import _search_entities
+    def test_finds_by_alias(self, temp_db):
+        from spiderweb.engine.l2.search import search_entities
 
         temp_db.execute(
             "INSERT INTO entities (canonical_name, entity_type, aliases_json) VALUES (?, ?, ?)",
@@ -65,70 +57,21 @@ class TestSearchEntities:
         )
         temp_db.commit()
 
-        result = await _search_entities(temp_db, {"query": "孙武"})
-        data = json.loads(result[0].text)
-        assert data["count"] == 1
+        results = search_entities(temp_db, "孙武")
+        assert len(results) == 1
 
-    @pytest.mark.asyncio
-    async def test_empty_result(self, temp_db):
-        from spiderweb.mcp.server import _search_entities
+    def test_empty_result(self, temp_db):
+        from spiderweb.engine.l2.search import search_entities
 
-        result = await _search_entities(temp_db, {"query": "不存在"})
-        data = json.loads(result[0].text)
-        assert data["count"] == 0
-
-
-class TestEntityRegister:
-    """RED→GREEN: entity_register creates or updates entities."""
-
-    @pytest.mark.asyncio
-    async def test_creates_new_entity(self, temp_db):
-        from spiderweb.mcp.server import _entity_register
-
-        result = await _entity_register(temp_db, {
-            "name": "墨子", "entity_type": "person.philosopher",
-            "aliases": ["墨翟"], "description": "墨家创始人"
-        })
-        data = json.loads(result[0].text)
-        assert data["ok"] is True
-        assert data["name"] == "墨子"
-
-        row = temp_db.execute(
-            "SELECT entity_type, source FROM entities WHERE canonical_name = ?",
-            ("墨子",)
-        ).fetchone()
-        assert row[0] == "person.philosopher"
-        assert row[1] == "manual"
-
-
-class TestRelationCRUD:
-    """RED→GREEN: relation_set creates, relation_list returns."""
-
-    @pytest.mark.asyncio
-    async def test_set_and_list(self, temp_db):
-        from spiderweb.mcp.server import _relation_set, _relation_list
-
-        await _relation_set(temp_db, {
-            "entity_a": "孔子", "entity_b": "论语",
-            "relation_type": "AUTHORED", "weight": 1.0
-        })
-
-        result = await _relation_list(temp_db, {"entity_name": "孔子"})
-        data = json.loads(result[0].text)
-        assert data["entity"] == "孔子"
-        assert len(data["relations"]) == 1
-        assert data["relations"][0]["a"] == "孔子"
+        results = search_entities(temp_db, "不存在")
+        assert len(results) == 0
 
 
 class TestGraphNavigate:
-    """RED→GREEN: graph_navigate returns edges from a seed entity."""
+    """graph_navigate returns edges from a seed entity."""
 
-    @pytest.mark.asyncio
-    async def test_returns_edges(self, temp_db):
-        from spiderweb.mcp.server import _graph_navigate
-        from spiderweb.engine.domain import load_domain
-
-        config = load_domain("/home/ubuntu/projects/spiderweb/domains/reading")
+    def test_returns_edges(self, temp_db):
+        from spiderweb.engine.l2.search import graph_navigate
 
         temp_db.execute("INSERT INTO entities (canonical_name) VALUES ('孔子')")
         temp_db.execute("INSERT INTO entities (canonical_name) VALUES ('论语')")
@@ -143,57 +86,102 @@ class TestGraphNavigate:
         )
         temp_db.commit()
 
-        result = await _graph_navigate(temp_db, config, {"seed": "孔子"})
-        data = json.loads(result[0].text)
-        assert data["position"]["entity"] == "孔子"
-        neighbor_names = [e["neighbor"] for e in data["anchored"] + data["exploration"]]
+        result = graph_navigate(temp_db, "孔子")
+        assert result["position"]["entity"] == "孔子"
+        neighbor_names = [e["neighbor"] for e in result["anchored"] + result["exploration"]]
         assert "论语" in neighbor_names
 
 
-class TestDocGet:
-    """RED→GREEN: doc_get returns chunk by ID."""
+class TestInsightWrite:
+    """write_insight with mocked LLM."""
 
     @pytest.mark.asyncio
-    async def test_returns_chunk(self, temp_db):
-        from spiderweb.mcp.server import _doc_get
+    async def test_write_insight(self, temp_db, reading_domain):
+        from spiderweb.engine.domain import load_domain
+        from spiderweb.engine.l3.insight import write_insight
 
-        temp_db.execute("INSERT INTO docs (path, title) VALUES ('/tmp/x.md', '测试')")
-        doc_id = temp_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        config = load_domain(reading_domain["domain_dir"])
+        config.data_dir = reading_domain["data_dir"]
+        config.llm = {"driver": "openai", "model": "deepseek-chat", "base_url": "http://localhost:0"}
+        config.embedding = {"driver": "none"}
+        config.tokenizer = {"driver": "none"}
+
+        result = await write_insight(temp_db, config, "测试笔记", "这是一条测试内容。")
+        assert result["ok"] is True
+        assert result["slug"] == "测试笔记"
+
+
+class TestReadingService:
+    """ReadingService with mocked LLM."""
+
+    @pytest.mark.asyncio
+    async def test_discover_status(self, temp_db, reading_domain):
+        from spiderweb.engine.domain import load_domain
+        from spiderweb.service.reading_service import ReadingService
+
+        config = load_domain(reading_domain["domain_dir"])
+        config.data_dir = reading_domain["data_dir"]
+        config.llm = {"driver": "openai", "model": "deepseek-chat", "base_url": "http://localhost:0"}
+        config.embedding = {"driver": "none"}
+        config.tokenizer = {"driver": "none"}
+
+        svc = ReadingService(temp_db, config)
+        # Force status intent via content match
+        result = await svc.discover("概况")
+        assert result["intent"] == "status"
+        assert "stats" in result
+
+    @pytest.mark.asyncio
+    async def test_discover_lookup_regex(self, temp_db, reading_domain):
+        """Regex fallback should classify '王阳明' as lookup when LLM fails."""
+        from spiderweb.engine.domain import load_domain
+        from spiderweb.service.reading_service import ReadingService
+
+        config = load_domain(reading_domain["domain_dir"])
+        config.data_dir = reading_domain["data_dir"]
+        config.llm = {"driver": "openai", "model": "deepseek-chat", "base_url": "http://localhost:0"}
+        config.embedding = {"driver": "none"}
+        config.tokenizer = {"driver": "none"}
+
+        svc = ReadingService(temp_db, config)
+        intent = svc._regex_intent("王阳明是谁")
+        assert intent == "lookup"
+
+    def test_regex_intent(self, temp_db, reading_domain):
+        from spiderweb.engine.domain import load_domain
+        from spiderweb.service.reading_service import ReadingService
+
+        config = load_domain(reading_domain["domain_dir"])
+        svc = ReadingService(temp_db, config)
+
+        assert svc._regex_intent("我之前记过什么") == "recall"
+        assert svc._regex_intent("孔子和孟子的区别") == "compare"
+        assert svc._regex_intent("探索一下关系网") == "explore"
+        assert svc._regex_intent("统计数据") == "status"
+        assert svc._regex_intent("随便问问") == "lookup"
+
+    @pytest.mark.asyncio
+    async def test_discover_with_data(self, temp_db, reading_domain):
+        from spiderweb.engine.domain import load_domain
+        from spiderweb.service.reading_service import ReadingService
+
+        config = load_domain(reading_domain["domain_dir"])
+        config.data_dir = reading_domain["data_dir"]
+        config.llm = {"driver": "openai", "model": "deepseek-chat", "base_url": "http://localhost:0"}
+        config.embedding = {"driver": "none"}
+        config.tokenizer = {"driver": "none"}
+
+        # Add test data
         temp_db.execute(
-            "INSERT INTO chunks (doc_id, body, section_path) VALUES (?,?,?)",
-            (doc_id, "正文内容", "第一章")
+            "INSERT INTO docs (path, title, author) VALUES ('/tmp/t.md', '测试书', '作者')"
         )
-        chunk_id = temp_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        temp_db.execute(
+            "INSERT INTO entities (canonical_name, entity_type) VALUES ('孔子', 'person.philosopher')"
+        )
         temp_db.commit()
 
-        result = await _doc_get(temp_db, {"chunk_id": chunk_id})
-        data = json.loads(result[0].text)
-        assert data["body"] == "正文内容"
-        assert data["section"] == "第一章"
-        assert data["doc_title"] == "测试"
+        svc = ReadingService(temp_db, config)
+        result = await svc.discover("孔子")
 
-
-class TestInsightCRUD:
-    """RED→GREEN: insight_record creates, insight_list returns."""
-
-    @pytest.mark.asyncio
-    async def test_record_and_list(self, temp_db):
-        from spiderweb.mcp.server import _insight_record, _insight_list
-        from spiderweb.engine.domain import load_domain
-        from unittest.mock import patch, AsyncMock
-
-        config = load_domain("/home/ubuntu/projects/spiderweb/domains/reading")
-
-        # Mock LLM to avoid real API call
-        mock_llm = AsyncMock()
-        mock_llm.chat.return_value = '{"entities": [], "relations": []}'
-
-        with patch('spiderweb.engine.providers.create_llm_provider', return_value=mock_llm):
-            await _insight_record(temp_db, config, {
-                "title": "我的笔记", "content": "这是一条测试笔记。"
-            })
-
-        result = await _insight_list(temp_db, {"limit": 10})
-        data = json.loads(result[0].text)
-        assert len(data["insights"]) == 1
-        assert data["insights"][0]["title"] == "我的笔记"
+        assert result["query"] == "孔子"
+        assert result["intent"] in ("lookup", "status")

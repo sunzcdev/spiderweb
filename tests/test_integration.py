@@ -89,16 +89,21 @@ class TestFullPipeline:
             assert entity_count >= 1
 
             # 6. Record insight with REAL LLM
-            from spiderweb.mcp.server import _insight_record, _insight_list
-            await _insight_record(temp_db, config, {
-                "title": "读孙子兵法有感",
-                "content": "今天读了孙子兵法的始计篇，孙子强调战争是国家大事，必须精心谋划。"
-            })
+            from spiderweb.engine.l3.insight import write_insight
+            write_result = await write_insight(
+                temp_db, config,
+                "读孙子兵法有感",
+                "今天读了孙子兵法的始计篇，孙子强调战争是国家大事，必须精心谋划。"
+            )
+            assert write_result["ok"] is True
+            assert write_result["slug"] == "读孙子兵法有感"
 
             # 7. Verify insight was recorded
-            insights = await _insight_list(temp_db, {"limit": 10})
-            insight_data = json.loads(insights[0].text)
-            assert len(insight_data["insights"]) >= 1
+            rows = temp_db.execute(
+                "SELECT slug, title FROM insights ORDER BY id DESC LIMIT 10"
+            ).fetchall()
+            assert len(rows) >= 1
+            assert rows[0][0] == "读孙子兵法有感"
 
             # 8. Check insights reference entities
             rows = temp_db.execute(

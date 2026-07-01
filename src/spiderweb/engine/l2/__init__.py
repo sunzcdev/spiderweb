@@ -1,3 +1,3 @@
-"""L2 — knowledge graph construction via LLM extraction."""
+"""L2 — knowledge graph construction and search."""
 
-__all__ = ["extract", "build"]
+__all__ = ["extract", "build", "search"]

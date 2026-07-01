@@ -87,9 +87,6 @@ async def extract_from_chunks(
     if config.entity_description_template:
         sys_prompt += "\n\nFor entity descriptions, follow this format:\n" + config.entity_description_template
 
-    # Fallback model if primary returns empty (deepseek-v4-flash rate limit)
-    _fallback_llm = None
-
     async def _extract_batch(provider, prompt):
         for attempt in range(3):
             try:
@@ -137,19 +134,14 @@ async def extract_from_chunks(
 
     _log(f"extractconcurrent: {len(prompts)} batches from {len(chunks)} chunks")
 
-    from ..providers import OpenAILLM
-    _fallback_llm = OpenAILLM(model="deepseek-v4-pro", base_url="https://api.deepseek.com/v1")
-
     async def _process_one(prompt_text: str, idx: int):
-        """Process one prompt: primary LLM → fallback if needed."""
+        """Process one prompt with LLM (primary + configured fallbacks handled by provider)."""
         full_prompt = user_template.format(
             entity_types=entity_types_str,
             relation_types=relation_types_str,
             text=prompt_text,
         )
         entities, relations = await _extract_batch(llm, full_prompt)
-        if entities is None:
-            entities, relations = await _extract_batch(_fallback_llm, full_prompt)
         result = entities if entities else []
         _log(f"extractdone batch {idx+1}/{len(prompts)}: {len(result)} entities")
         return result, relations if relations else []

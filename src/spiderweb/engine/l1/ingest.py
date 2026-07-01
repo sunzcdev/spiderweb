@@ -231,7 +231,7 @@ async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int],
 
 
 async def hybrid_search(db, query: str, query_vec: list[float] | None, top_n: int = 5,
-                  tokenizer=None, reranker=None) -> list[dict]:
+                  tokenizer=None, reranker=None, body_max_len: int | None = 500) -> list[dict]:
     """Hybrid search: FTS5 + LIKE + vector → dedup → rerank → top_n."""
     results = []
     seen = set()
@@ -273,7 +273,7 @@ async def hybrid_search(db, query: str, query_vec: list[float] | None, top_n: in
             seen.add(cid)
             results.append({
                 "chunk_id": cid, "doc_id": r[1], "section": r[2],
-                "body": r[3][:500], "doc_title": r[4], "source": "text"
+                "body": r[3][:body_max_len] if body_max_len else r[3], "doc_title": r[4], "source": "text"
             })
 
     # Vector results (if available)
@@ -295,7 +295,7 @@ async def hybrid_search(db, query: str, query_vec: list[float] | None, top_n: in
                     seen.add(cid)
                     results.append({
                         "chunk_id": cid, "doc_id": r[1], "section": r[2],
-                        "body": r[3][:500], "doc_title": r[4], "source": "vector"
+                        "body": r[3][:body_max_len] if body_max_len else r[3], "doc_title": r[4], "source": "vector"
                     })
 
     # Rerank: re-score merged results by relevance (if reranker configured)

@@ -1,5 +1,6 @@
 """Provider interfaces — LLM, embedding, tokenizer, reranker."""
 import os
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -37,20 +38,51 @@ class OpenAILLM(LLMProvider):
     base_url: str = "https://api.deepseek.com/v1"
     api_key: str = ""
     temperature: float = 0.3
+    fallback: list = field(default_factory=list)
 
     async def chat(self, messages: list[dict], **kwargs) -> str:
-        from openai import AsyncOpenAI
         import httpx
-        key = self.api_key or os.environ.get("SPIDERWEB_LLM_API_KEY", "")
-        timeout = httpx.Timeout(60.0, connect=15.0, read=60.0, write=60.0)
-        client = AsyncOpenAI(api_key=key, base_url=self.base_url, timeout=timeout)
-        response = await client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=kwargs.get("temperature", 0.0),
-            response_format={"type": "json_object"},  # constrained JSON decoding — much faster
-        )
-        return response.choices[0].message.content
+        from openai import AsyncOpenAI
+
+        providers = [
+            {"base_url": self.base_url, "api_key": self.api_key, "model": self.model, "_label": "primary"},
+        ]
+        for fb in self.fallback:
+            key = os.environ.get(fb.get("api_key_env", ""), "")
+            if not key:
+                continue
+            providers.append({
+                "base_url": fb.get("base_url", self.base_url),
+                "api_key": key,
+                "model": fb.get("model", self.model),
+                "_label": f"fallback:{fb.get('model', '?')}",
+            })
+
+        last_error = None
+        for prov in providers:
+            key = prov["api_key"] or os.environ.get("SPIDERWEB_LLM_API_KEY", "")
+            if not key:
+                continue
+            try:
+                timeout = httpx.Timeout(60.0, connect=15.0, read=60.0, write=60.0)
+                client = AsyncOpenAI(api_key=key, base_url=prov["base_url"], timeout=timeout)
+                response = await client.chat.completions.create(
+                    model=prov["model"],
+                    messages=messages,
+                    temperature=kwargs.get("temperature", 0.0),
+                    response_format={"type": "json_object"},
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                label = prov["_label"]
+                if label == "primary":
+                    print(f"    ⚠️ LLM 主通道失败: {e}", file=sys.stderr)
+                else:
+                    print(f"    ⚠️ {label} 也失败: {e}", file=sys.stderr)
+                last_error = e
+                continue
+
+        raise last_error or RuntimeError("All LLM providers failed")
 
 
 @dataclass
@@ -89,6 +121,7 @@ def create_llm_provider(config: dict) -> LLMProvider:
             model=config.get("model", "deepseek-chat"),
             base_url=config.get("base_url", "https://api.deepseek.com/v1"),
             api_key=config.get("api_key", ""),
+            fallback=config.get("fallback", []),
         )
     raise ValueError(f"Unknown LLM driver: {driver}")
 
