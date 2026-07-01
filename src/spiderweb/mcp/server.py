@@ -801,10 +801,30 @@ async def main(domain_path: str | None = None):
     global _config
     _config = load_domain(os.environ["SPIDERWEB_DOMAIN"])
 
+    # Prevent duplicate MCP processes
+    pid_file = os.path.join(_config.data_dir, "mcp.pid")
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file) as f:
+                old_pid = int(f.read().strip())
+            os.kill(old_pid, 0)
+            sys.stderr.write(f"[spiderweb] MCP already running (PID {old_pid}), exiting\n")
+            sys.exit(0)
+        except (OSError, ValueError):
+            os.remove(pid_file)
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+
     # Init debug logging
     if os.environ.get("SPIDERWEB_DEBUG") == "1":
         debug_init(_config.data_dir)
         sys.stderr.write(f"[spiderweb] debug logging to {_config.data_dir}/debug.log\n")
 
-    async with stdio_server() as (reader, writer):
-        await server.run(reader, writer, server.create_initialization_options())
+    try:
+        async with stdio_server() as (reader, writer):
+            await server.run(reader, writer, server.create_initialization_options())
+    finally:
+        try:
+            os.remove(pid_file)
+        except OSError:
+            pass
