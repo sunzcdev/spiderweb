@@ -42,13 +42,15 @@ class OpenAILLM(LLMProvider):
         from openai import AsyncOpenAI
         import httpx
         key = self.api_key or os.environ.get("SPIDERWEB_LLM_API_KEY", "")
-        timeout = httpx.Timeout(kwargs.get("timeout", 60.0), connect=15.0)
+        timeout_s = kwargs.get("timeout", 60.0)
+        timeout = httpx.Timeout(timeout_s, connect=15.0)
         client = AsyncOpenAI(api_key=key, base_url=self.base_url, timeout=timeout)
         response = await client.chat.completions.create(
             model=self.model,
             messages=messages,
             temperature=kwargs.get("temperature", self.temperature),
             max_tokens=kwargs.get("max_tokens", 2048),
+            timeout=timeout,
         )
         return response.choices[0].message.content
 
