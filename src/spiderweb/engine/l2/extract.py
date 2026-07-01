@@ -18,22 +18,16 @@ async def _backoff(attempt: int):
 
 EXTRACT_SYSTEM = """你从中文文本中提取知识图谱。文本含多个段落（用---分隔）。输出 JSON: {"entities":[{"name":"实体名","type":"类型","aliases":["别名"],"description":"一句话描述"}],"relations":[{"entity_a":"","entity_b":"","relation_type":""}]}。只提取明确出现的实体。"""
 
-EXTRACT_USER = """Entity types available:
-{entity_types}
+EXTRACT_USER = """实体类型: {entity_types}
 
-Relation types available:
-{relation_types}
+关系类型: {relation_types}
 
-Valid relation patterns:
-{valid_triplets}
-
-Text passage:
+文本:
 ---
 {text}
 ---
 
-Output JSON with "entities" and "relations" arrays.
-{{"entities": [...], "relations": [...]}}"""
+输出 JSON: {{"entities":[{{"name":"实体名","type":"类型","aliases":["别名"],"description":"一句话描述"}}],"relations":[{{"entity_a":"","entity_b":"","relation_type":""}}]}}"""
 
 
 def _format_types(config: DomainConfig) -> str:
@@ -147,7 +141,6 @@ async def extract_from_chunks(
             prompt = user_template.format(
                 entity_types=entity_types_str,
                 relation_types=relation_types_str,
-                valid_triplets=valid_triplets_str,
                 text=combined_text,
             )
 
