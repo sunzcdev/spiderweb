@@ -48,7 +48,7 @@ class OpenAILLM(LLMProvider):
             model=self.model,
             messages=messages,
             temperature=kwargs.get("temperature", self.temperature),
-            max_tokens=kwargs.get("max_tokens", 2048),
+            max_tokens=kwargs.get("max_tokens", 8192),  # v4 reasoning models need headroom
         )
         return response.choices[0].message.content
 
