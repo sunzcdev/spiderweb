@@ -1,16 +1,10 @@
-Entity types available:
-{entity_types}
+实体类型: {entity_types}
 
-Relation types available:
-{relation_types}
+关系类型: {relation_types}
 
-Valid relation patterns:
-{valid_triplets}
-
-Text passage:
+文本:
 ---
 {text}
 ---
 
-Output JSON with "entities" and "relations" arrays.
-Example: {{"entities": [...], "relations": [...]}}
+输出 JSON: {"entities":[{"name":"实体名","type":"类型","aliases":["别名"],"description":"一句话描述"}],"relations":[{"entity_a":"","entity_b":"","relation_type":""}]}
