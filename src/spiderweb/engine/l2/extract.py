@@ -167,7 +167,7 @@ async def extract_from_chunks(
             if entities is None:
                 if _fallback_llm is None:
                     from ..providers import OpenAILLM
-                    _fallback_llm = OpenAILLM(model="deepseek-chat", base_url="https://api.deepseek.com/v1")
+                    _fallback_llm = OpenAILLM(model="deepseek-v4-pro", base_url="https://api.deepseek.com/v1")
                 entities, relations = await _extract_batch(_fallback_llm, prompt)
 
             if entities:
