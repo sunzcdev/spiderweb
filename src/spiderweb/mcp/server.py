@@ -808,7 +808,7 @@ async def main(domain_path: str | None = None):
             with open(pid_file) as f:
                 old_pid = int(f.read().strip())
             os.kill(old_pid, 0)
-            sys.stderr.write(f"[spiderweb] MCP already running (PID {old_pid}), exiting\n")
+            sys.stderr.write(f"[spiderweb] PID lock: instance already running (PID {old_pid}), this is normal — skipping duplicate start\n")
             sys.exit(0)
         except (OSError, ValueError):
             os.remove(pid_file)
