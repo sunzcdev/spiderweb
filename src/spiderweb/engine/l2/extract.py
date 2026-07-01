@@ -8,7 +8,7 @@ from ..providers import LLMProvider
 from ..domain import DomainConfig, get_entity_types_flat
 from ..hooks import run_validators
 
-BATCH_TIMEOUT_S = 60     # per LLM call
+BATCH_TIMEOUT_S = 120    # per LLM call
 OVERALL_TIMEOUT_S = 600  # entire extraction
 
 
