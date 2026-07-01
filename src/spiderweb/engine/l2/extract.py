@@ -166,12 +166,14 @@ async def extract_from_chunks(
         _log(f"extractwave {wave}: {count} batches (offset={offset})")
 
         tasks = [_process_one(prompts[i][0], i) for i in batch]
-        wave_results = await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True),
-            timeout=OVERALL_TIMEOUT_S,
-        )
-        for i, r in zip(batch, wave_results):
-            results[i] = r
+        done, pending = await asyncio.wait(tasks, timeout=BATCH_TIMEOUT_S * 2)
+        for t in pending:
+            t.cancel()
+        for i, t in zip(batch, tasks):
+            if t in done and not t.exception():
+                results[i] = t.result()
+            else:
+                _log(f"extractbatch {i+1}/{len(prompts)} skipped (timeout or error)")
 
         offset += count
         wave *= 3
