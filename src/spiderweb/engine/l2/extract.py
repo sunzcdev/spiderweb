@@ -165,7 +165,7 @@ async def extract_from_chunks(
         batch = range(offset, offset + count)
         _log(f"extractwave {wave}: {count} batches (offset={offset})")
 
-        tasks = [_process_one(prompts[i][0], i) for i in batch]
+        tasks = [asyncio.create_task(_process_one(prompts[i][0], i)) for i in batch]
         done, pending = await asyncio.wait(tasks, timeout=BATCH_TIMEOUT_S * 2)
         for t in pending:
             t.cancel()
