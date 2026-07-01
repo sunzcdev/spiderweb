@@ -114,65 +114,61 @@ async def extract_from_chunks(
         _log(f"extractbatch FAILED after 3 attempts")
         return None, None
 
-    # deepseek-chat has 64K token context. Prompt template takes ~3K tokens.
-    # Chinese: 1 token ≈ 1.5-2 chars. Safe: 40K chars ≈ 25K tokens for text.
-    MAX_CHARS_PER_CALL = 20_000  # keep prompts reasonably sized
-    t_start = time.time()
-    batch_num = 0
-    total_batches = (len(chunks) + batch_size - 1) // batch_size
-    failures = 0
-    MAX_CONSECUTIVE_FAILURES = 5
+    # Build all prompts first (old code: all batches concurrent, 整本书耗时=最慢单个batch)
+    MAX_CHARS_PER_CALL = 20_000
+    prompts = []  # list of (prompt_text, chunk_count, char_count)
 
     for i in range(0, len(chunks), batch_size):
-        if time.time() - t_start > OVERALL_TIMEOUT_S:
-            _log(f"extractoverall timeout ({OVERALL_TIMEOUT_S}s) after {batch_num} batches")
-            break
-
         batch = chunks[i:i + batch_size]
-
-        # Split oversized batches by char count
-        sub_batches = []
         current_group, current_chars = [], 0
         for cid, text in batch:
             text_len = len(text)
             if current_chars + text_len > MAX_CHARS_PER_CALL and current_group:
-                sub_batches.append(current_group)
+                combined = "\n\n---\n\n".join(t for _, t in current_group)
+                prompts.append((combined, len(current_group), current_chars))
                 current_group, current_chars = [], 0
             current_group.append((cid, text))
             current_chars += text_len
         if current_group:
-            sub_batches.append(current_group)
+            combined = "\n\n---\n\n".join(t for _, t in current_group)
+            prompts.append((combined, len(current_group), current_chars))
 
-        for sub in sub_batches:
-            batch_num += 1
-            combined_text = "\n\n---\n\n".join(text for _, text in sub)
-            _log(f"extractbatch {batch_num} — {len(sub)} chunks, {len(combined_text)} chars")
+    _log(f"extractconcurrent: {len(prompts)} batches from {len(chunks)} chunks")
 
-            prompt = user_template.format(
-                entity_types=entity_types_str,
-                relation_types=relation_types_str,
-                text=combined_text,
-            )
+    from ..providers import OpenAILLM
+    _fallback_llm = OpenAILLM(model="deepseek-v4-pro", base_url="https://api.deepseek.com/v1")
 
-            entities, relations = await _extract_batch(llm, prompt)
-            if entities is None:
-                if _fallback_llm is None:
-                    from ..providers import OpenAILLM
-                    _fallback_llm = OpenAILLM(model="deepseek-v4-pro", base_url="https://api.deepseek.com/v1")
-                entities, relations = await _extract_batch(_fallback_llm, prompt)
+    async def _process_one(prompt_text: str, idx: int):
+        """Process one prompt: primary LLM → fallback if needed."""
+        full_prompt = user_template.format(
+            entity_types=entity_types_str,
+            relation_types=relation_types_str,
+            text=prompt_text,
+        )
+        entities, relations = await _extract_batch(llm, full_prompt)
+        if entities is None:
+            entities, relations = await _extract_batch(_fallback_llm, full_prompt)
+        result = entities if entities else []
+        _log(f"extractdone batch {idx+1}/{len(prompts)}: {len(result)} entities")
+        return result, relations if relations else []
 
-            if entities:
-                all_entities.extend(entities)
-                all_relations.extend(relations)
-                failures = 0
-            else:
-                failures += 1
-                if failures >= MAX_CONSECUTIVE_FAILURES:
-                    _log(f"extractaborted: {failures} consecutive batch failures")
-                    break
+    # Fire all concurrently
+    t_start = time.time()
+    tasks = [_process_one(p[0], i) for i, p in enumerate(prompts)]
+    results = await asyncio.wait_for(
+        asyncio.gather(*tasks, return_exceptions=True),
+        timeout=OVERALL_TIMEOUT_S,
+    )
 
-        if failures >= MAX_CONSECUTIVE_FAILURES:
-            break
+    _log(f"extractall done in {time.time()-t_start:.0f}s")
+
+    for r in results:
+        if isinstance(r, Exception):
+            _log(f"extractbatch exception: {r}")
+            continue
+        if isinstance(r, tuple) and len(r) == 2:
+            all_entities.extend(r[0])
+            all_relations.extend(r[1])
 
     # Deduplicate entities by canonical name
     seen = {}
