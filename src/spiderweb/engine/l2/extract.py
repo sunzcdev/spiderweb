@@ -26,7 +26,7 @@ async def _backoff(attempt: int):
     """Exponential backoff: 0.5s, 1s, 2s."""
     await asyncio.sleep(0.5 * (2 ** attempt))
 
-EXTRACT_SYSTEM = """你从中文文本中提取知识图谱。文本含多个段落（用---分隔）。输出 JSON: {"entities":[{"name":"实体名","type":"类型","aliases":["别名"],"description":"一句话描述"}],"relations":[{"entity_a":"","entity_b":"","relation_type":""}]}。只提取明确出现的实体。"""
+EXTRACT_SYSTEM = """你从中文文本中提取知识图谱。输出 JSON: {"entities":[{"name":"实体名","type":"类型"}],"relations":[{"entity_a":"","entity_b":"","relation_type":""}]}。只提取明确出现的实体。"""
 
 EXTRACT_USER = """实体类型: {entity_types}
 
@@ -37,7 +37,7 @@ EXTRACT_USER = """实体类型: {entity_types}
 {text}
 ---
 
-输出 JSON: {{"entities":[{{"name":"实体名","type":"类型","aliases":["别名"],"description":"一句话描述"}}],"relations":[{{"entity_a":"","entity_b":"","relation_type":""}}]}}"""
+输出 JSON: {{"entities":[{{"name":"实体名","type":"类型"}}],"relations":[{{"entity_a":"","entity_b":"","relation_type":""}}]}}"""
 
 
 def _format_types(config: DomainConfig) -> str:

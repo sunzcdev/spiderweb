@@ -7,4 +7,4 @@
 {text}
 ---
 
-输出 JSON: {{"entities":[{{"name":"实体名","type":"类型","aliases":["别名"],"description":"一句话描述"}}],"relations":[{{"entity_a":"","entity_b":"","relation_type":""}}]}}
+输出 JSON: {{"entities":[{{"name":"实体名","type":"类型"}}],"relations":[{{"entity_a":"","entity_b":"","relation_type":""}}]}}
