@@ -114,11 +114,9 @@ async def extract_from_chunks(
         _log(f"extractbatch FAILED after 3 attempts")
         return None, None
 
-    # Adaptive batching: balance concurrency, cache, and token cost
-    # Small books → fewer batches, combine chunks. Large books → cap at 30 chunks.
-    # Target ~12K chars/batch (fast LLM response), max 10 concurrent (API rate limit).
-    MAX_CHARS_PER_CALL = 12_000
-    MAX_CONCURRENT = 10
+    # Adaptive batching: exponential concurrency 1→3→9→...
+    # Wave 1 warms prompt cache, then scale up. Target ~15K chars/batch.
+    MAX_CHARS_PER_CALL = 15_000
 
     # Build prompts with char-limit splitting
     prompts = []  # list of (prompt_text, chunk_count, char_count)
@@ -137,35 +135,46 @@ async def extract_from_chunks(
             combined = "\n\n---\n\n".join(t for _, t in current_group)
             prompts.append((combined, len(current_group), current_chars))
 
-    _log(f"extractconcurrent: {len(prompts)} batches from {len(chunks)} chunks, max_concurrent={min(MAX_CONCURRENT, len(prompts))}")
+    _log(f"extractconcurrent: {len(prompts)} batches from {len(chunks)} chunks")
 
     from ..providers import OpenAILLM
     _fallback_llm = OpenAILLM(model="deepseek-v4-pro", base_url="https://api.deepseek.com/v1")
 
-    semaphore = asyncio.Semaphore(min(MAX_CONCURRENT, len(prompts)))
-
     async def _process_one(prompt_text: str, idx: int):
-        """Process one prompt: primary LLM → fallback if needed. Rate-limited by semaphore."""
-        async with semaphore:
-            full_prompt = user_template.format(
-                entity_types=entity_types_str,
-                relation_types=relation_types_str,
-                text=prompt_text,
-            )
-            entities, relations = await _extract_batch(llm, full_prompt)
-            if entities is None:
-                entities, relations = await _extract_batch(_fallback_llm, full_prompt)
-            result = entities if entities else []
-            _log(f"extractdone batch {idx+1}/{len(prompts)}: {len(result)} entities")
-            return result, relations if relations else []
+        """Process one prompt: primary LLM → fallback if needed."""
+        full_prompt = user_template.format(
+            entity_types=entity_types_str,
+            relation_types=relation_types_str,
+            text=prompt_text,
+        )
+        entities, relations = await _extract_batch(llm, full_prompt)
+        if entities is None:
+            entities, relations = await _extract_batch(_fallback_llm, full_prompt)
+        result = entities if entities else []
+        _log(f"extractdone batch {idx+1}/{len(prompts)}: {len(result)} entities")
+        return result, relations if relations else []
 
-    # Fire all concurrently with semaphore gate
+    # Exponential concurrency: 1→3→9→... warms prompt cache, then full speed
+    results = [None] * len(prompts)
     t_start = time.time()
-    tasks = [_process_one(p[0], i) for i, p in enumerate(prompts)]
-    results = await asyncio.wait_for(
-        asyncio.gather(*tasks, return_exceptions=True),
-        timeout=OVERALL_TIMEOUT_S,
-    )
+    offset = 0
+    wave = 1  # 1, 3, 9, 27...
+
+    while offset < len(prompts):
+        count = min(wave, len(prompts) - offset)
+        batch = range(offset, offset + count)
+        _log(f"extractwave {wave}: {count} batches (offset={offset})")
+
+        tasks = [_process_one(prompts[i][0], i) for i in batch]
+        wave_results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=OVERALL_TIMEOUT_S,
+        )
+        for i, r in zip(batch, wave_results):
+            results[i] = r
+
+        offset += count
+        wave *= 3
 
     _log(f"extractall done in {time.time()-t_start:.0f}s")
 
