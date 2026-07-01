@@ -12,58 +12,37 @@
 
 ## 可用工具
 
+只有 3 个工具，所有复杂度都被封装了：
+
 | 工具 | 用途 |
 |------|------|
-| `search_chunks` | 在书中搜索段落 |
-| `search_entities` | 搜索人物/概念等实体 |
-| `search_insights` | 搜索已有的阅读心得 |
-| `doc_get` | 获取段落完整内容 |
-| `graph_navigate` | 从某个实体出发，看周围的关系网 |
-| `entity_get` | 看实体的详细信息 |
-| `relation_set` | 手动添加实体间关系 |
-| `insight_record` | 记录阅读心得（会自动连到 L2 实体） |
-| `insight_list` | 查看最近的阅读心得 |
-| `graph_stats` | 看图谱统计 |
+| `discover` | **搜一切**。传入自然语言问题，自动判断意图、搜哪些层、怎么组装结果 |
+| `record` | **记心得**。传入原文，引擎自动抽实体并连到知识图谱 |
+| `ingest` | **收录新书**。传入文件路径，自动解析、分块、索引、向量化、建图谱 |
 
-## 实体类型
+## 核心工作流
 
-- **person** — 人物（ruler 统治者, philosopher 哲学家, character 虚构角色, author 作者）
-- **work** — 著作（classic 经典, commentary 注疏, novel 小说）
-- **concept** — 概念（school 学派, doctrine 学说, pattern 模式, theory 理论）
-- **event** — 事件（battle 战役, era 时代）
-- **location** — 地点
+### 用户问"X 是什么" / 对比分析 / 翻旧账
+→ `discover(query="用户的问题")`
+返回结构：
+- `passages` — 相关段落
+- `entities` — 相关实体（附详情、关联书、关系）
+- `insights` — 相关心得
+- `summary` — 自然语言摘要
 
-## 关系类型
-
-- **AUTHORED** (权重10) — 创作关系（person → work）
-- **INFLUENCED_BY** (权重5) — 思想影响
-- **DERIVES_FROM** (权重5) — 源头关系
-- **CONTRADICTS** (权重5) — 对立/矛盾
-- **PARTICIPATED_IN** (权重5) — 参与事件
-- **LOCATED_IN** (权重3) — 位于
-- **KNOWS** (权重3) — 人物相识
-- **BELONGS_TO** (权重3) — 归属学派
-- **PRECEDES** (权重2) — 时间先后
-- **MENTIONS** (权重1) — 一般提及
-
-## 标准工作流
-
-### 用户问"X 是什么"
-1. `search_entities` 找实体 → `entity_get` 看详情
-2. 信息不足 → `search_chunks` 在书里搜 → `doc_get` 取原文
-3. 想知道关联 → `graph_navigate` 展开关系网
+不需要手动组合多个工具，discover 内部自动决策。
 
 ### 用户分享读书心得
-1. `insight_record` 记录，引擎会自动抽实体连到 L2
-2. 发现新实体 → `entity_get` 确认是否已在图谱中
+→ `record(content="心得原文")`
+引擎自动抽实体、注册到 L2、建 MENTIONS 边、更新足迹。
 
-### 探索图谱
-1. 用户给一个起点（人名/概念/书名）
-2. `graph_navigate` 展开 → 锚定边是明确关系，探索边是潜在线索
-3. 根据用户兴趣选择往哪走，继续 `graph_navigate`
+如果心得出自特定书：`record(content="心得原文", source="书名")`
+
+### 新书入库
+→ `ingest(source="/path/to/book.epub")`
+同步返回，等全部完成（分块、索引、向量、建图）。
 
 ## 原则
-- 工具能查到的不用 LLM 记忆
-- graph_navigate 的 anchored 边是可靠的，优先呈现
-- exploration 边是线索，需要用户确认才深入
-- 心得记录后自动连回 L2 实体，不需要手动关联
+- discover 查到的信息直接用，**不要用 LLM 记忆代替**（如"我记得传习录里有句话……"→ 必须调 discover）
+- record 不需要问用户要不要记——你判断是原创观点就直接记
+- ingest 是同步的，等返回结果后再通知用户
