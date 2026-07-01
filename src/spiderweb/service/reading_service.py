@@ -82,6 +82,8 @@ class ReadingService:
 
     async def record(self, content: str, source: str | None = None) -> dict:
         """记一条心得。引擎自动抽实体、关联到 L2。"""
+        if not content or not content.strip():
+            return {"ok": False, "error": "content is empty"}
         title = content[:50].strip().split("\n")[0]
         source_docs = [source] if source else []
         return await write_insight(self.db, self.config, title, content, source_docs)
@@ -191,7 +193,7 @@ class ReadingService:
         try:
             resp = await self._llm.chat(
                 [{"role": "user", "content": prompt}],
-                temperature=0, max_tokens=5,
+                temperature=0, max_tokens=5, response_format=None,
             )
             resp = resp.strip().lower().rstrip(".")
             if resp in ("lookup", "compare", "recall", "explore", "status"):
@@ -225,23 +227,22 @@ class ReadingService:
     async def _search_layers(self, query: str, intent: str) -> dict:
         """Search relevant layers based on intent. Returns {passages?, entities?, insights?}."""
         layers = {}
-        tasks = []
 
         if intent in ("lookup", "compare"):
-            # All 3 layers in parallel
+            # Embed once, share across L1 and L3
+            query_vec = await self._embed_query(query)
+            # Entities is sync SQL — run it directly, not in gather
+            layers["entities"] = self._standardize_entities(search_entities(self.db, query))
+            # L1 and L3 have real IO — parallel gather
             tasks = [
-                asyncio.create_task(self._search_chunks(query)),
-                asyncio.create_task(self._search_entities(query)),
-                asyncio.create_task(self._search_insights(query)),
+                asyncio.create_task(self._search_chunks(query, query_vec)),
+                asyncio.create_task(self._search_insights(query, query_vec)),
             ]
             done = await asyncio.gather(*tasks, return_exceptions=True)
-            passages, ents, ins = done
-            if not isinstance(passages, BaseException):
-                layers["passages"] = passages
-            if not isinstance(ents, BaseException):
-                layers["entities"] = ents
-            if not isinstance(ins, BaseException):
-                layers["insights"] = ins
+            if not isinstance(done[0], BaseException):
+                layers["passages"] = done[0]
+            if not isinstance(done[1], BaseException):
+                layers["insights"] = done[1]
 
         elif intent == "recall":
             # Insights only
@@ -250,48 +251,44 @@ class ReadingService:
                 layers["insights"] = ins
 
         elif intent == "explore":
-            # Entities only
-            ents = search_entities(self.db, query)
-            layers["entities"] = self._standardize_entities(ents)
+            # Entities only (sync SQL)
+            layers["entities"] = self._standardize_entities(search_entities(self.db, query))
 
         return layers
 
-    async def _search_chunks(self, query: str, top_n: int = 5) -> list[dict]:
-        """Search L1 passages with full body."""
-        config = self.config
-        query_vec = None
-        emb_provider = create_embedding_provider(config.embedding)
+    async def _embed_query(self, query: str) -> list[float] | None:
+        """Embed a query once. Returns vector or None."""
+        emb_provider = create_embedding_provider(self.config.embedding)
         if emb_provider:
             try:
                 vecs = await emb_provider.embed([query])
-                query_vec = vecs[0] if vecs else None
+                return vecs[0] if vecs else None
             except Exception:
                 pass
+        return None
 
-        tokenizer = create_tokenizer_provider(config.tokenizer)
-        reranker = create_reranker_provider(config.reranker)
+    async def _search_chunks(self, query: str, query_vec: list[float] | None = None,
+                             top_n: int = 5) -> list[dict]:
+        """Search L1 passages with full body."""
+        if query_vec is None:
+            query_vec = await self._embed_query(query)
+        tokenizer = create_tokenizer_provider(self.config.tokenizer)
+        reranker = create_reranker_provider(self.config.reranker)
         results = await hybrid_search(
             self.db, query, query_vec, top_n, tokenizer, reranker,
-            body_max_len=None,  # full body
+            body_max_len=None,
         )
-        return [{
-            "book": r["doc_title"],
-            "section": r["section"],
-            "body": r["body"],
-        } for r in results]
+        return [{"book": r["doc_title"], "section": r["section"], "body": r["body"]}
+                for r in results]
 
-    async def _search_entities(self, query: str) -> list[dict]:
-        """Search L2 entities, return standardized format."""
-        ents = search_entities(self.db, query)
-        return self._standardize_entities(ents)
-
-    async def _search_insights(self, query: str, top_n: int = 5) -> list[dict]:
+    async def _search_insights(self, query: str, query_vec: list[float] | None = None,
+                               top_n: int = 5) -> list[dict]:
         """Search L3 insights, return standardized format."""
-        results = await search_insights(self.db, query, self.config, top_n)
-        return [{
-            "title": r["title"],
-            "content": r["content"],
-        } for r in results]
+        if query_vec is not None:
+            results = await search_insights(self.db, query, self.config, top_n, query_vec)
+        else:
+            results = await search_insights(self.db, query, self.config, top_n)
+        return [{"title": r["title"], "content": r["content"]} for r in results]
 
     # ── Status ──────────────────────────────────────────────────
 
@@ -333,6 +330,8 @@ class ReadingService:
                     "name": name,
                     "type": e.get("type", "concept"),
                     "description": e.get("description"),
+                    "books": e.get("books"),
+                    "relations": e.get("relations"),
                 })
         # Add graph neighbors as entities (for explore/compare)
         graph = layers.get("graph")
@@ -391,7 +390,7 @@ class ReadingService:
         try:
             return await self._llm.chat(
                 [{"role": "user", "content": filled}],
-                temperature=0.3, max_tokens=300,
+                temperature=0.3, max_tokens=300, response_format=None,
             )
         except Exception:
             return None

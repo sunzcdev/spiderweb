@@ -66,12 +66,19 @@ class OpenAILLM(LLMProvider):
             try:
                 timeout = httpx.Timeout(60.0, connect=15.0, read=60.0, write=60.0)
                 client = AsyncOpenAI(api_key=key, base_url=prov["base_url"], timeout=timeout)
-                response = await client.chat.completions.create(
+                api_kwargs = dict(
                     model=prov["model"],
                     messages=messages,
                     temperature=kwargs.get("temperature", 0.0),
-                    response_format={"type": "json_object"},
                 )
+                # Forward max_tokens if caller passed it
+                if "max_tokens" in kwargs:
+                    api_kwargs["max_tokens"] = kwargs["max_tokens"]
+                # response_format: default json_object, caller can opt out with None
+                rf = kwargs.get("response_format", {"type": "json_object"})
+                if rf is not None:
+                    api_kwargs["response_format"] = rf
+                response = await client.chat.completions.create(**api_kwargs)
                 return response.choices[0].message.content
             except Exception as e:
                 label = prov["_label"]

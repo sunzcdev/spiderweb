@@ -12,7 +12,7 @@ def search_entities(db, query: str, entity_type: str = "") -> list[dict]:
     rows = db.execute(sql, params).fetchall()
     return [{
         "name": r[0], "type": r[1],
-        "aliases": json.loads(r[2]),
+        "aliases": json.loads(r[2]) if r[2] else [],
         "description": r[3], "cross_doc_count": r[4],
     } for r in rows]
 
@@ -113,14 +113,16 @@ def graph_navigate(db, seed: str, depth: int = 1) -> dict | None:
 
     # Depth=2: treat top anchored neighbor as next hop
     if depth >= 2 and anchored:
+        depth1_anchored = anchored[:15]
+        depth1_exploration = exploration[:10]
         next_hop = anchored[0]["neighbor"]
         path_trace.append(next_hop)
         anc2, exp2 = _expand(next_hop)
-        anchored = [
+        anchored = depth1_anchored + [
             {"neighbor": n["neighbor"], "relation": f"{name}→{next_hop}→", "weight": n["weight"]}
             for n in anc2[:10]
         ]
-        exploration = exploration[:10] + exp2[:10]
+        exploration = depth1_exploration + exp2[:10]
 
     # Record footprints
     _record_trace(db, name)

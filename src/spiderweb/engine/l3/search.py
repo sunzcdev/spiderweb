@@ -3,8 +3,12 @@ import json
 from ..providers import create_tokenizer_provider, create_embedding_provider
 
 
-async def search_insights(db, query: str, config, top_n: int = 5) -> list[dict]:
-    """Search insights by title and content. FTS5 (jieba) + LIKE + vector → dedup → top_n."""
+async def search_insights(db, query: str, config, top_n: int = 5,
+                          query_vec: list[float] | None = None) -> list[dict]:
+    """Search insights by title and content. FTS5 (jieba) + LIKE + vector → dedup → top_n.
+
+    query_vec: pre-computed query embedding. If None, computed internally.
+    """
     results = []
     seen = set()
 
@@ -48,16 +52,21 @@ async def search_insights(db, query: str, config, top_n: int = 5) -> list[dict]:
                 "content": r[3][:300], "created_at": r[4], "source": "like",
             })
 
-    # Vector search (semantic)
-    emb_provider = create_embedding_provider(config.embedding)
-    if emb_provider:
-        has_vec = db.execute(
-            "SELECT value FROM _meta WHERE key = 'has_vectors_insights_vec'"
-        ).fetchone()
-        if has_vec and has_vec[0] == '1':
+    # Vector search (semantic) — use pre-computed query_vec if provided
+    if query_vec is None:
+        emb_provider = create_embedding_provider(config.embedding)
+        if emb_provider:
             try:
                 vecs = await emb_provider.embed([query])
-                query_vec = vecs[0]
+                query_vec = vecs[0] if vecs else None
+            except Exception:
+                pass
+    if query_vec is not None:
+        try:
+            has_vec = db.execute(
+                "SELECT value FROM _meta WHERE key = 'has_vectors_insights_vec'"
+            ).fetchone()
+            if has_vec and has_vec[0] == '1':
                 vec_rows = db.execute(
                     "SELECT i.id, i.slug, i.title, i.content, i.created_at, v.distance "
                     "FROM insights_vec v "
@@ -72,7 +81,7 @@ async def search_insights(db, query: str, config, top_n: int = 5) -> list[dict]:
                             "id": r[0], "slug": r[1], "title": r[2],
                             "content": r[3][:300], "created_at": r[4], "source": "vector",
                         })
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     return results[:top_n]
