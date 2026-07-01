@@ -2,9 +2,14 @@
 import json
 import re
 import asyncio
+import sys
+import time
 from ..providers import LLMProvider
 from ..domain import DomainConfig, get_entity_types_flat
 from ..hooks import run_validators
+
+BATCH_TIMEOUT_S = 90     # per LLM call
+OVERALL_TIMEOUT_S = 600  # entire extraction
 
 
 async def _backoff(attempt: int):
@@ -96,26 +101,41 @@ async def extract_from_chunks(
     async def _extract_batch(provider, prompt):
         for attempt in range(3):
             try:
-                response = await provider.chat([
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": prompt},
-                ])
+                response = await asyncio.wait_for(
+                    provider.chat([
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": prompt},
+                    ]),
+                    timeout=BATCH_TIMEOUT_S,
+                )
                 if not response or not response.strip():
                     await _backoff(attempt)
                     continue
                 data = _parse_json(response)
                 if data and "entities" in data:
                     return data.get("entities", []), data.get("relations", [])
-            except Exception:
-                pass
+            except asyncio.TimeoutError:
+                print(f"[spiderweb] extract batch timed out ({BATCH_TIMEOUT_S}s), attempt {attempt+1}", file=sys.stderr)
+            except Exception as e:
+                print(f"[spiderweb] extract batch error: {e}", file=sys.stderr)
             await _backoff(attempt)
+        print(f"[spiderweb] extract batch FAILED after 3 attempts", file=sys.stderr)
         return None, None
 
     # deepseek-chat has 64K token context. Prompt template takes ~3K tokens.
     # Chinese: 1 token ≈ 1.5-2 chars. Safe: 40K chars ≈ 25K tokens for text.
     MAX_CHARS_PER_CALL = 40_000
+    t_start = time.time()
+    batch_num = 0
+    total_batches = (len(chunks) + batch_size - 1) // batch_size
+    failures = 0
+    MAX_CONSECUTIVE_FAILURES = 5
 
     for i in range(0, len(chunks), batch_size):
+        if time.time() - t_start > OVERALL_TIMEOUT_S:
+            print(f"[spiderweb] extract overall timeout ({OVERALL_TIMEOUT_S}s) after {batch_num} batches", file=sys.stderr)
+            break
+
         batch = chunks[i:i + batch_size]
 
         # Split oversized batches by char count
@@ -132,7 +152,9 @@ async def extract_from_chunks(
             sub_batches.append(current_group)
 
         for sub in sub_batches:
+            batch_num += 1
             combined_text = "\n\n---\n\n".join(text for _, text in sub)
+            print(f"[spiderweb] extract batch {batch_num} — {len(sub)} chunks, {len(combined_text)} chars", file=sys.stderr)
 
             prompt = user_template.format(
                 entity_types=entity_types_str,
@@ -151,6 +173,15 @@ async def extract_from_chunks(
             if entities:
                 all_entities.extend(entities)
                 all_relations.extend(relations)
+                failures = 0
+            else:
+                failures += 1
+                if failures >= MAX_CONSECUTIVE_FAILURES:
+                    print(f"[spiderweb] extract aborted: {failures} consecutive batch failures", file=sys.stderr)
+                    break
+
+        if failures >= MAX_CONSECUTIVE_FAILURES:
+            break
 
     # Deduplicate entities by canonical name
     seen = {}
