@@ -97,11 +97,11 @@ async def extract_from_chunks(
                 if data and "entities" in data:
                     return data.get("entities", []), data.get("relations", [])
             except asyncio.TimeoutError:
-                print(f"[spiderweb] extract batch timed out ({BATCH_TIMEOUT_S}s), attempt {attempt+1}", file=sys.stderr)
+                print(f"[spiderweb] extract batch timed out ({BATCH_TIMEOUT_S}s), attempt {attempt+1}", file=sys.stderr, flush=True)
             except Exception as e:
-                print(f"[spiderweb] extract batch error: {e}", file=sys.stderr)
+                print(f"[spiderweb] extract batch error: {e}", file=sys.stderr, flush=True)
             await _backoff(attempt)
-        print(f"[spiderweb] extract batch FAILED after 3 attempts", file=sys.stderr)
+        print(f"[spiderweb] extract batch FAILED after 3 attempts", file=sys.stderr, flush=True)
         return None, None
 
     # deepseek-chat has 64K token context. Prompt template takes ~3K tokens.
@@ -115,7 +115,7 @@ async def extract_from_chunks(
 
     for i in range(0, len(chunks), batch_size):
         if time.time() - t_start > OVERALL_TIMEOUT_S:
-            print(f"[spiderweb] extract overall timeout ({OVERALL_TIMEOUT_S}s) after {batch_num} batches", file=sys.stderr)
+            print(f"[spiderweb] extract overall timeout ({OVERALL_TIMEOUT_S}s) after {batch_num} batches", file=sys.stderr, flush=True)
             break
 
         batch = chunks[i:i + batch_size]
@@ -136,7 +136,7 @@ async def extract_from_chunks(
         for sub in sub_batches:
             batch_num += 1
             combined_text = "\n\n---\n\n".join(text for _, text in sub)
-            print(f"[spiderweb] extract batch {batch_num} — {len(sub)} chunks, {len(combined_text)} chars", file=sys.stderr)
+            print(f"[spiderweb] extract batch {batch_num} — {len(sub)} chunks, {len(combined_text)} chars", file=sys.stderr, flush=True)
 
             prompt = user_template.format(
                 entity_types=entity_types_str,
@@ -158,7 +158,7 @@ async def extract_from_chunks(
             else:
                 failures += 1
                 if failures >= MAX_CONSECUTIVE_FAILURES:
-                    print(f"[spiderweb] extract aborted: {failures} consecutive batch failures", file=sys.stderr)
+                    print(f"[spiderweb] extract aborted: {failures} consecutive batch failures", file=sys.stderr, flush=True)
                     break
 
         if failures >= MAX_CONSECUTIVE_FAILURES:

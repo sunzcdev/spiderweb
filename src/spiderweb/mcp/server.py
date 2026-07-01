@@ -141,7 +141,7 @@ async def _doc_ingest(db, config: DomainConfig, args, progress=None, session=Non
     replaced = False
     existing = db.execute("SELECT id, title FROM docs WHERE path = ?", (file_path,)).fetchone()
     if existing:
-        print(f"[spiderweb] doc_ingest: replacing existing doc #{existing[0]} '{existing[1]}' (same path)", file=sys.stderr)
+        print(f"[spiderweb] doc_ingest: replacing existing doc #{existing[0]} '{existing[1]}' (same path)", file=sys.stderr, flush=True)
         await _doc_delete(db, {"doc_id": existing[0]})
         replaced = True
 
@@ -189,7 +189,7 @@ async def _doc_ingest(db, config: DomainConfig, args, progress=None, session=Non
     task_id = f"ingest_{doc_id}"
     _tasks[task_id] = {"status": "running", "progress_pct": 5, "stage": "L1完成", "title": title}
 
-    print(f"[spiderweb] doc_ingest: #{doc_id} '{title}' — {chunk_count} chunks ingested (L1 done, bg started)", file=sys.stderr)
+    print(f"[spiderweb] doc_ingest: #{doc_id} '{title}' — {chunk_count} chunks ingested (L1 done, bg started)", file=sys.stderr, flush=True)
 
     # Background: vector indexing + graph_build
     import asyncio as _asyncio
@@ -213,9 +213,9 @@ async def _doc_ingest(db, config: DomainConfig, args, progress=None, session=Non
             try:
                 vec_count = await index_vectors(db, emb_provider, chunk_ids)
                 await _notify(50, "向量化完成", f"{vec_count} 个向量")
-                print(f"[spiderweb] doc_ingest #{doc_id}: {vec_count} vectors indexed", file=sys.stderr)
+                print(f"[spiderweb] doc_ingest #{doc_id}: {vec_count} vectors indexed", file=sys.stderr, flush=True)
             except Exception as e:
-                print(f"[spiderweb] doc_ingest #{doc_id}: vector indexing failed: {e}", file=sys.stderr)
+                print(f"[spiderweb] doc_ingest #{doc_id}: vector indexing failed: {e}", file=sys.stderr, flush=True)
 
         try:
             await _notify(60, "建网中...", "LLM 提取实体和关系")
@@ -233,15 +233,15 @@ async def _doc_ingest(db, config: DomainConfig, args, progress=None, session=Non
                     ))
                 except Exception:
                     pass
-            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build done — {ef} entities", file=sys.stderr)
+            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build done — {ef} entities", file=sys.stderr, flush=True)
         except TimeoutError:
             _tasks[task_id] = {"status": "failed", "progress_pct": 90, "stage": "建网超时",
                                "title": title, "error": "graph_build timed out"}
-            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build TIMEOUT", file=sys.stderr)
+            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build TIMEOUT", file=sys.stderr, flush=True)
         except Exception as e:
             _tasks[task_id] = {"status": "failed", "progress_pct": 90, "stage": "建网失败",
                                "title": title, "error": str(e)[:200]}
-            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build failed: {e}", file=sys.stderr)
+            print(f"[spiderweb] doc_ingest #{doc_id}: graph_build failed: {e}", file=sys.stderr, flush=True)
 
     _asyncio.create_task(_bg_vector_and_graph())
 
@@ -436,7 +436,7 @@ async def _doc_delete(db, args) -> list[TextContent]:
 
     title = doc[0]
     chunk_count = db.execute("SELECT COUNT(*) FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()[0]
-    print(f"[spiderweb] doc_delete: #{doc_id} '{title}' — {chunk_count} chunks", file=sys.stderr)
+    print(f"[spiderweb] doc_delete: #{doc_id} '{title}' — {chunk_count} chunks", file=sys.stderr, flush=True)
 
     # Get chunk IDs for this doc
     chunk_ids = [r[0] for r in db.execute("SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)).fetchall()]
@@ -795,7 +795,7 @@ async def main(domain_path: str | None = None):
         os.environ["SPIDERWEB_DOMAIN"] = args.domain
 
     if not os.environ.get("SPIDERWEB_DOMAIN"):
-        print("Error: Set SPIDERWEB_DOMAIN env var or use --domain", file=sys.stderr)
+        print("Error: Set SPIDERWEB_DOMAIN env var or use --domain", file=sys.stderr, flush=True)
         sys.exit(1)
 
     global _config
