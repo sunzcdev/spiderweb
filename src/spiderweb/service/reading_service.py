@@ -193,11 +193,14 @@ class ReadingService:
         try:
             resp = await self._llm.chat(
                 [{"role": "user", "content": prompt}],
-                temperature=0, max_tokens=5, response_format=None,
+                temperature=0, max_tokens=20,
             )
-            resp = resp.strip().lower().rstrip(".")
-            if resp in ("lookup", "compare", "recall", "explore", "status"):
-                return resp
+            if resp:
+                data = json.loads(resp)
+                if isinstance(data, dict):
+                    intent = data.get("intent", "").strip().lower()
+                    if intent in ("lookup", "compare", "recall", "explore", "status"):
+                        return intent
         except Exception:
             pass
 
@@ -379,19 +382,28 @@ class ReadingService:
         if not prompt:
             return None
 
+        # Truncate passage bodies in summary context to keep prompt short
+        trunc = lambda d: {**d, "body": d.get("body", "")[:200]} if "body" in d else d
+        passages = [trunc(p) for p in result.get("passages", [])[:3]]
         context = json.dumps({
             "intent": intent,
-            "passages": result.get("passages", [])[:3],
+            "passages": passages,
             "entities": result.get("entities", [])[:5],
             "insights": result.get("insights", [])[:3],
         }, ensure_ascii=False)
 
         filled = prompt.replace("{intent}", intent).replace("{results}", context)
         try:
-            return await self._llm.chat(
+            text = await self._llm.chat(
                 [{"role": "user", "content": filled}],
-                temperature=0.3, max_tokens=300, response_format=None,
+                temperature=0.3, max_tokens=300,
             )
+            if text:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    return data.get("summary", "")
+                return str(data)
+            return None
         except Exception:
             return None
 
