@@ -234,8 +234,8 @@ class ReadingService:
         if intent in ("lookup", "compare"):
             # Embed once, share across L1 and L3
             query_vec = await self._embed_query(query)
-            # Entities is sync SQL — run it directly, not in gather
-            layers["entities"] = self._standardize_entities(search_entities(self.db, query))
+            # Entities: try full query first, then individual terms
+            layers["entities"] = self._standardize_entities(self._multi_term_entity_search(query))
             # L1 and L3 have real IO — parallel gather
             tasks = [
                 asyncio.create_task(self._search_chunks(query, query_vec)),
@@ -255,9 +255,31 @@ class ReadingService:
 
         elif intent == "explore":
             # Entities only (sync SQL)
-            layers["entities"] = self._standardize_entities(search_entities(self.db, query))
+            layers["entities"] = self._standardize_entities(self._multi_term_entity_search(query))
 
         return layers
+
+    def _multi_term_entity_search(self, query: str) -> list[dict]:
+        """Search entities matching the full query or any individual term."""
+        import re as _re
+
+        # Try full query first (handles single-entity queries like "王阳明")
+        results = search_entities(self.db, query)
+        if results:
+            return results
+
+        # Split into individual terms and search each
+        terms = _re.split(r'[\s,，。、；;：:()（）""''【】{}]+', query)
+        terms = [t.strip() for t in terms if len(t.strip()) >= 2]
+
+        seen = set()
+        all_results = []
+        for term in terms:
+            for e in search_entities(self.db, term):
+                if e["name"] not in seen:
+                    seen.add(e["name"])
+                    all_results.append(e)
+        return all_results
 
     async def _embed_query(self, query: str) -> list[float] | None:
         """Embed a query once. Returns vector or None."""

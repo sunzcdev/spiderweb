@@ -148,6 +148,7 @@ def get_db(db_path: str) -> _NoClose:
 
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_autocheckpoint=500")  # ~2MB before auto-checkpoint
     conn.execute("PRAGMA foreign_keys=ON")
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
