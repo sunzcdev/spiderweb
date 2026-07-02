@@ -232,10 +232,10 @@ class ReadingService:
         layers = {}
 
         if intent in ("lookup", "compare"):
-            # Embed once, share across L1 and L3
+            # Embed once, share across all layers
             query_vec = await self._embed_query(query)
-            # Entities: try full query first, then individual terms
-            layers["entities"] = self._standardize_entities(self._multi_term_entity_search(query))
+            # Entities: discover semantically via chunk vec_search
+            layers["entities"] = await self._search_entities_semantic(query, query_vec)
             # L1 and L3 have real IO — parallel gather
             tasks = [
                 asyncio.create_task(self._search_chunks(query, query_vec)),
@@ -254,37 +254,46 @@ class ReadingService:
                 layers["insights"] = ins
 
         elif intent == "explore":
-            # Entities only (sync SQL)
-            layers["entities"] = self._standardize_entities(self._multi_term_entity_search(query))
+            # Entities only — embed + semantic search
+            query_vec = await self._embed_query(query)
+            layers["entities"] = await self._search_entities_semantic(query, query_vec)
 
         return layers
 
-    def _multi_term_entity_search(self, query: str) -> list[dict]:
-        """Search entities matching the full query or any individual term."""
-        # Try full query first (handles single-entity queries like "王阳明")
-        results = search_entities(self.db, query)
-        if results:
-            return results
+    async def _search_entities_semantic(self, query: str,
+                                         query_vec: list[float] | None = None) -> list[dict]:
+        """Discover entities via semantic chunk search.
 
-        # Generate query terms: jieba tokenization for Chinese, split for others
-        terms = set()
+        Embeds the query, finds semantically relevant chunks, then extracts
+        entity mentions from those chunks. Avoids character-level word fragments.
+        """
+        if query_vec is None:
+            query_vec = await self._embed_query(query)
+        if not query_vec:
+            # Fallback: full-query LIKE
+            return self._standardize_entities(search_entities(self.db, query))
+
         tokenizer = create_tokenizer_provider(self.config.tokenizer)
-        if tokenizer:
-            tokens = tokenizer.tokenize(query)
-            terms.update(t.strip() for t in tokens.split() if len(t.strip()) >= 2)
-        # Also split by explicit separators
-        import re as _re
-        terms.update(t.strip() for t in _re.split(r'[\s,，。、；;：:()（）""''【】{}]+', query)
-                    if len(t.strip()) >= 2)
+        reranker = create_reranker_provider(self.config.reranker)
+        chunks = await hybrid_search(
+            self.db, query, query_vec, top_n=10,
+            tokenizer=tokenizer, reranker=reranker, body_max_len=200,
+        )
+        if not chunks:
+            return self._standardize_entities(search_entities(self.db, query))
 
-        seen = set()
-        all_results = []
-        for term in terms:
-            for e in search_entities(self.db, term):
-                if e["name"] not in seen:
-                    seen.add(e["name"])
-                    all_results.append(e)
-        return all_results
+        chunk_ids = [c["chunk_id"] for c in chunks]
+        placeholders = ",".join("?" * len(chunk_ids))
+        rows = self.db.execute(f"""
+            SELECT DISTINCT e.canonical_name, e.entity_type, e.description
+            FROM entities e
+            WHERE EXISTS (
+                SELECT 1 FROM chunks c
+                WHERE c.id IN ({placeholders})
+                AND c.body LIKE '%' || e.canonical_name || '%'
+            )
+        """, chunk_ids).fetchall()
+        return [{"name": r[0], "type": r[1], "description": r[2] or ""} for r in rows]
 
     async def _embed_query(self, query: str) -> list[float] | None:
         """Embed a query once. Returns vector or None."""

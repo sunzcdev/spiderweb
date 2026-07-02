@@ -234,24 +234,10 @@ async def write_insight(db, config, title: str, content: str, source_docs: list 
     # Reverse extract entities and link to L2
     link_result = {}
     try:
-        from ..providers import create_llm_provider, OpenAILLM
-        # Try fast extraction model (sensenova flash-lite) first
-        import os as _os
-        sensenova_key = _os.environ.get("SENSENOVA_API_KEY", "")
-        if sensenova_key:
-            llm = OpenAILLM(
-                model="sensenova-6.7-flash-lite",
-                base_url="https://token.sensenova.cn/v1",
-                api_key=sensenova_key,
-            )
-            entities, relations = await reverse_extract(llm, config, content)
-        else:
-            entities, relations = None, None
-        # Fallback: primary LLM if sensenova failed or not configured
-        if not entities:
-            llm = create_llm_provider(config.llm)
-            entities, relations = await reverse_extract(llm, config, content)
-        link_result = link_insight_to_entities(db, config, insight_id, entities or [], relations or [])
+        from ..providers import create_llm_provider
+        llm = create_llm_provider(config.llm)
+        entities, relations = await reverse_extract(llm, config, content)
+        link_result = link_insight_to_entities(db, config, insight_id, entities, relations)
     except Exception as e:
         link_result = {"error": str(e)}
 
