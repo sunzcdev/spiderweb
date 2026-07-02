@@ -261,16 +261,21 @@ class ReadingService:
 
     def _multi_term_entity_search(self, query: str) -> list[dict]:
         """Search entities matching the full query or any individual term."""
-        import re as _re
-
         # Try full query first (handles single-entity queries like "王阳明")
         results = search_entities(self.db, query)
         if results:
             return results
 
-        # Split into individual terms and search each
-        terms = _re.split(r'[\s,，。、；;：:()（）""''【】{}]+', query)
-        terms = [t.strip() for t in terms if len(t.strip()) >= 2]
+        # Generate query terms: jieba tokenization for Chinese, split for others
+        terms = set()
+        tokenizer = create_tokenizer_provider(self.config.tokenizer)
+        if tokenizer:
+            tokens = tokenizer.tokenize(query)
+            terms.update(t.strip() for t in tokens.split() if len(t.strip()) >= 2)
+        # Also split by explicit separators
+        import re as _re
+        terms.update(t.strip() for t in _re.split(r'[\s,，。、；;：:()（）""''【】{}]+', query)
+                    if len(t.strip()) >= 2)
 
         seen = set()
         all_results = []

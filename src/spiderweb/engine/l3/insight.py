@@ -258,15 +258,12 @@ async def write_insight(db, config, title: str, content: str, source_docs: list 
     # Linked books (from source_docs + entity traces)
     linked_books = list(set(source_docs))
     if link_result and "entity_names" in link_result:
-        types = link_result.get("entity_types", {})
         for name in link_result["entity_names"]:
-            # Skip generic concepts that match too many books
-            etype = types.get(name, "")
-            doc_count = db.execute(
-                "SELECT COUNT(DISTINCT d.id) FROM chunks c JOIN docs d ON c.doc_id = d.id "
-                "WHERE c.body LIKE ?", (f"%{name}%",)
-            ).fetchone()[0]
-            if doc_count > 5:
+            # Skip generic terms that appear in many docs (use cached cross_doc_count)
+            row = db.execute(
+                "SELECT cross_doc_count FROM entities WHERE canonical_name = ?", (name,)
+            ).fetchone()
+            if row and row[0] and row[0] > 5:
                 continue
             doc_rows = db.execute(
                 "SELECT DISTINCT d.title FROM chunks c JOIN docs d ON c.doc_id = d.id "
