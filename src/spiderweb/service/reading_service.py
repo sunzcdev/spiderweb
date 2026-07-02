@@ -266,12 +266,22 @@ class ReadingService:
 
         Embeds the query, finds semantically relevant chunks, then extracts
         entity mentions from those chunks. Avoids character-level word fragments.
+        Falls back to LIKE on the full query, then on whitespace-separated terms.
         """
+        # Fallback: try full query, then whitespace terms (handles "王阳明 知行合一")
+        def _like_fallback(q):
+            ents = search_entities(self.db, q)
+            if not ents:
+                for term in q.split():
+                    ents = search_entities(self.db, term)
+                    if ents:
+                        break
+            return self._standardize_entities(ents)
+
         if query_vec is None:
             query_vec = await self._embed_query(query)
         if not query_vec:
-            # Fallback: full-query LIKE
-            return self._standardize_entities(search_entities(self.db, query))
+            return _like_fallback(query)
 
         tokenizer = create_tokenizer_provider(self.config.tokenizer)
         reranker = create_reranker_provider(self.config.reranker)
@@ -280,7 +290,7 @@ class ReadingService:
             tokenizer=tokenizer, reranker=reranker, body_max_len=200,
         )
         if not chunks:
-            return self._standardize_entities(search_entities(self.db, query))
+            return _like_fallback(query)
 
         chunk_ids = [c["chunk_id"] for c in chunks]
         placeholders = ",".join("?" * len(chunk_ids))
