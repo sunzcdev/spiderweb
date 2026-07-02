@@ -108,7 +108,11 @@ class _NoClose:
         return getattr(self._conn, name)
 
     def close(self):
-        self._conn.rollback()  # ponytail: safety rollback, not real close
+        self._conn.rollback()  # safety rollback, not real close
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
 
     def really_close(self):
         self._conn.close()

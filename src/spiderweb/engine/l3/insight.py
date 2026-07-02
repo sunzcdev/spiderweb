@@ -88,14 +88,18 @@ def link_insight_to_entities(
     """Register extracted entities, build MENTIONS edges, update traces. Returns stats."""
     registered = 0
     linked = 0
-    entity_names = []
+    entity_names = []  # list of (name, type) tuples
 
     for e in entities:
         name = e.get("name", "").strip()
         etype = e.get("type", "concept")
         if not name:
             continue
-        entity_names.append(name)
+        entity_names.append((name, etype))
+
+        existing = db.execute(
+            "SELECT id FROM entities WHERE canonical_name = ?", (name,)
+        ).fetchone()
 
         existing = db.execute(
             "SELECT id FROM entities WHERE canonical_name = ?", (name,)
@@ -114,14 +118,14 @@ def link_insight_to_entities(
     if insight_slug:
         insight_title = insight_slug[0]
         # Insight mentions each entity
-        for name in entity_names:
+        for name, _ in entity_names:
             if _ensure_relation(db, insight_title, name, "MENTIONS", 1.0, config):
                 linked += 1
 
     # Entity co-occurrence within the insight (all pairs mention each other)
     all_rels = list(relations)
-    for i, a in enumerate(entity_names):
-        for b in entity_names[i + 1:]:
+    for i, (a, _) in enumerate(entity_names):
+        for b, _ in entity_names[i + 1:]:
             all_rels.append({"entity_a": a, "entity_b": b, "relation_type": "MENTIONS"})
 
     for r in all_rels:
@@ -131,7 +135,7 @@ def link_insight_to_entities(
                 linked += 1
 
     # Record traces
-    for name in entity_names:
+    for name, _ in entity_names:
         db.execute(
             "INSERT INTO entity_traces (entity_name, source, count, last_seen) "
             "VALUES (?, 'l3_insight', 1, datetime('now')) "
@@ -142,11 +146,11 @@ def link_insight_to_entities(
     # Update insight's entities_json
     db.execute(
         "UPDATE insights SET entities_json = ? WHERE id = ?",
-        (json.dumps(entity_names, ensure_ascii=False), insight_id)
+        (json.dumps([n for n, _ in entity_names], ensure_ascii=False), insight_id)
     )
 
     # Update cross_doc_count for affected entities
-    for name in entity_names:
+    for name, _ in entity_names:
         count = db.execute(
             "SELECT COUNT(DISTINCT doc_id) FROM chunks WHERE body LIKE ?",
             (f"%{name}%",)
@@ -162,7 +166,8 @@ def link_insight_to_entities(
         "entities_extracted": len(entity_names),
         "entities_registered": registered,
         "edges_added": linked,
-        "entity_names": entity_names,
+        "entity_names": [n for n, _ in entity_names],
+        "entity_types": {n: t for n, t in entity_names},
     }
 
 
@@ -239,7 +244,12 @@ async def write_insight(db, config, title: str, content: str, source_docs: list 
     # Linked books (from source_docs + entity traces)
     linked_books = list(set(source_docs))
     if link_result and "entity_names" in link_result:
+        types = link_result.get("entity_types", {})
         for name in link_result["entity_names"]:
+            # Only link specific entities (person, work) — skip generic concepts
+            etype = types.get(name, "")
+            if etype and not etype.startswith(("person.", "person", "work.", "work", "event.", "event")):
+                continue
             doc_rows = db.execute(
                 "SELECT DISTINCT d.title FROM chunks c JOIN docs d ON c.doc_id = d.id "
                 "WHERE c.body LIKE ? LIMIT 3", (f"%{name}%",)
@@ -257,6 +267,7 @@ async def write_insight(db, config, title: str, content: str, source_docs: list 
         "entities_registered": link_result.get("entities_registered", 0),
         "edges_added": link_result.get("edges_added", 0),
         "linked_books": linked_books[:10],
+        "entity_names": link_result.get("entity_names", []),
         "vectors": vec_count,
     }
 
