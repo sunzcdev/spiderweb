@@ -126,39 +126,51 @@ class TestReadingService:
         config.tokenizer = {"driver": "none"}
 
         svc = ReadingService(temp_db, config)
-        # Force status intent via content match
         result = await svc.discover("概况")
         assert result["intent"] == "status"
         assert "stats" in result
 
     @pytest.mark.asyncio
-    async def test_discover_lookup_regex(self, temp_db, reading_domain):
-        """Regex fallback should classify '王阳明' as lookup when LLM fails."""
+    async def test_find_seed_entity(self, temp_db, reading_domain):
         from spiderweb.engine.domain import load_domain
         from spiderweb.service.reading_service import ReadingService
 
         config = load_domain(reading_domain["domain_dir"])
         config.data_dir = reading_domain["data_dir"]
-        config.llm = {"driver": "openai", "model": "deepseek-chat", "base_url": "http://localhost:0"}
-        config.embedding = {"driver": "none"}
-        config.tokenizer = {"driver": "none"}
 
         svc = ReadingService(temp_db, config)
-        intent = svc._regex_intent("王阳明是谁")
-        assert intent == "lookup"
+        # No entities → None
+        assert svc._find_seed_entity("王阳明") is None
 
-    def test_regex_intent(self, temp_db, reading_domain):
+        temp_db.execute(
+            "INSERT INTO entities (canonical_name, entity_type, aliases_json) VALUES (?, ?, ?)",
+            ("王守仁", "person.philosopher", '["王阳明"]')
+        )
+        temp_db.commit()
+
+        assert svc._find_seed_entity("王阳明是谁") == "王守仁"  # split → "王阳明" → aliases match
+        assert svc._find_seed_entity("随便问问") is None  # no entity
+
+    @pytest.mark.asyncio
+    async def test_find_seed_entity_cjk(self, temp_db, reading_domain):
+        """CJK compound without spaces: '阳明知行合一' finds '王守仁' via progressive prefix."""
         from spiderweb.engine.domain import load_domain
         from spiderweb.service.reading_service import ReadingService
 
         config = load_domain(reading_domain["domain_dir"])
-        svc = ReadingService(temp_db, config)
+        config.data_dir = reading_domain["data_dir"]
 
-        assert svc._regex_intent("我之前记过什么") == "recall"
-        assert svc._regex_intent("孔子和孟子的区别") == "compare"
-        assert svc._regex_intent("探索一下关系网") == "explore"
-        assert svc._regex_intent("统计数据") == "status"
-        assert svc._regex_intent("随便问问") == "lookup"
+        temp_db.execute(
+            "INSERT INTO entities (canonical_name, entity_type, aliases_json) VALUES (?, ?, ?)",
+            ("王守仁", "person.philosopher", '["王阳明","阳明先生"]')
+        )
+        temp_db.commit()
+
+        svc = ReadingService(temp_db, config)
+        # "阳明知行合一" → full match fails → split no help (["阳明知行合一"])
+        # → progressive prefix: "阳明知行合"→"阳明知行"→"阳明知"→"阳明" matches via aliases
+        seed = svc._find_seed_entity("阳明知行合一")
+        assert seed == "王守仁"
 
     @pytest.mark.asyncio
     async def test_discover_with_data(self, temp_db, reading_domain):
@@ -184,4 +196,6 @@ class TestReadingService:
         result = await svc.discover("孔子")
 
         assert result["query"] == "孔子"
-        assert result["intent"] in ("lookup", "status")
+        assert result["mode"] == "summary"
+        assert result["seed"] == "孔子"
+        assert result["graph"]["position"]["entity"] == "孔子"

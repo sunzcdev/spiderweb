@@ -36,9 +36,10 @@ def _json_result(data) -> str:
 async def list_tools():
     return [
         Tool(name="discover",
-             description="搜一切。自然语言问题，自动判断意图，返回分组结果。",
+             description="搜一切。summary→图谱脉络，detail→原文详情。",
              inputSchema={"type": "object", "properties": {
                  "query": {"type": "string", "description": "自然语言问题"},
+                 "mode": {"type": "string", "description": "summary-图谱脉络 / detail-原文详情", "enum": ["summary", "detail"]},
              }}),
         Tool(name="record",
              description="记录阅读心得，自动关联到知识图谱。",
@@ -65,7 +66,7 @@ async def call_tool(name: str, arguments: dict, context=None):
 
     try:
         if name == "discover":
-            result = await _reading.discover(arguments["query"])
+            result = await _reading.discover(arguments["query"], arguments.get("mode", "summary"))
         elif name == "record":
             result = await _reading.record(
                 arguments["content"],
