@@ -59,6 +59,101 @@ def _ensure_entity_traces(db) -> bool:
     return False
 
 
+@_migration("rebuild_fts_external_content", "Rebuild FTS tables with external-content mode + triggers")
+def _rebuild_fts_external_content(db) -> bool:
+    """Upgrade chunks_fts and insights_fts from embedded to external-content mode with triggers.
+
+    Drops old FTS tables (content is in base tables), recreates with external-content,
+    rebuilds indexes from base tables, and creates sync triggers.
+    """
+    # Check if already upgraded: look for content='chunks' in FTS table definition
+    row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks_fts'"
+    ).fetchone()
+    if row and "content='chunks'" in row[0]:
+        return False  # Already external-content
+
+    # 1. Drop old FTS tables
+    db.execute("DROP TABLE IF EXISTS chunks_fts")
+    db.execute("DROP TABLE IF EXISTS insights_fts")
+
+    # 2. Recreate with external-content mode
+    db.executescript("""
+        CREATE VIRTUAL TABLE chunks_fts USING fts5(
+            body,
+            content='chunks',
+            content_rowid='id',
+            tokenize='unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+          INSERT INTO chunks_fts(rowid, body) VALUES (new.id, new.body);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+          INSERT INTO chunks_fts(chunks_fts, rowid, body) VALUES('delete', old.id, old.body);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+          INSERT INTO chunks_fts(chunks_fts, rowid, body) VALUES('delete', old.id, old.body);
+          INSERT INTO chunks_fts(rowid, body) VALUES (new.id, new.body);
+        END;
+
+        CREATE VIRTUAL TABLE insights_fts USING fts5(
+            title,
+            content,
+            content='insights',
+            content_rowid='id',
+            tokenize='unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS insights_ai AFTER INSERT ON insights BEGIN
+          INSERT INTO insights_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS insights_ad AFTER DELETE ON insights BEGIN
+          INSERT INTO insights_fts(insights_fts, rowid, title, content) VALUES('delete', old.id, old.title, old.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS insights_au AFTER UPDATE ON insights BEGIN
+          INSERT INTO insights_fts(insights_fts, rowid, title, content) VALUES('delete', old.id, old.title, old.content);
+          INSERT INTO insights_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+        END;
+    """)
+
+    # 3. Rebuild FTS indexes from base tables
+    db.execute("INSERT INTO chunks_fts(rowid, body) SELECT id, body FROM chunks")
+    db.execute("INSERT INTO insights_fts(rowid, title, content) SELECT id, title, content FROM insights")
+
+    return True
+
+
+@_migration("add_chunks_unique_index", "Add unique index on chunks(doc_id, section_path)")
+def _add_chunks_unique_index(db) -> bool:
+    """Add UNIQUE index for idempotent chunk inserts. Can't ALTER TABLE ADD CONSTRAINT
+    in SQLite, so we create an equivalent unique index.
+
+    Deduplicates chunks first — old data may have duplicates from pre-fix ingestion.
+    Keeps the earliest row (lowest id) for each (doc_id, section_path) pair.
+    """
+    # Check if index already exists
+    row = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_chunks_unique'"
+    ).fetchone()
+    if row:
+        return False
+
+    # Deduplicate: keep lowest id per (doc_id, section_path)
+    db.execute("""
+        DELETE FROM chunks WHERE id NOT IN (
+            SELECT MIN(id) FROM chunks GROUP BY doc_id, section_path
+        )
+    """)
+
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_unique ON chunks(doc_id, section_path)")
+    return True
+
+
 # ──────────────────────────────────────────────
 # Public API
 # ──────────────────────────────────────────────
