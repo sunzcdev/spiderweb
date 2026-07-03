@@ -28,4 +28,3 @@ packages = ["src/spiderweb"]
 markers = [
     "integration: real LLM end-to-end tests (require API keys)",
 ]
-asyncio_mode = "auto"

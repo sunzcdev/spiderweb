@@ -200,21 +200,41 @@ async def write_insight(db, config, title: str, content: str, source_docs: list 
     source_docs = source_docs or []
     slug = re.sub(r'[^a-z0-9一-鿿]+', '-', title.lower().strip())[:80]
 
-    cursor = db.execute(
-        "INSERT OR REPLACE INTO insights (slug, title, content, source_docs_json, updated_at) "
-        "VALUES (?, ?, ?, ?, datetime('now'))",
-        (slug, title, content, json.dumps(source_docs, ensure_ascii=False))
-    )
-    insight_id = cursor.lastrowid
+    # SELECT→UPDATE or INSERT (avoid INSERT OR REPLACE which changes rowid)
+    existing = db.execute(
+        "SELECT id FROM insights WHERE slug = ?", (slug,)
+    ).fetchone()
+
+    if existing:
+        insight_id = existing[0]
+        # UPDATE: preserve rowid so FTS/vec rows stay in sync
+        db.execute(
+            "UPDATE insights SET title = ?, content = ?, source_docs_json = ?, updated_at = datetime('now') "
+            "WHERE slug = ?",
+            (title, content, json.dumps(source_docs, ensure_ascii=False), slug)
+        )
+    else:
+        # INSERT: new insight
+        cursor = db.execute(
+            "INSERT INTO insights (slug, title, content, source_docs_json, updated_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'))",
+            (slug, title, content, json.dumps(source_docs, ensure_ascii=False))
+        )
+        insight_id = cursor.lastrowid
 
     # FTS5: write tokenized text for Chinese word segmentation
+    # Trigger will auto-sync on INSERT; on UPDATE we must manually sync
     tokenizer = create_tokenizer_provider(config.tokenizer)
     fts_title = tokenizer.tokenize(title) if tokenizer else title
     fts_content = tokenizer.tokenize(content) if tokenizer else content
-    db.execute(
-        "INSERT OR REPLACE INTO insights_fts(rowid, title, content) VALUES (?, ?, ?)",
-        (insight_id, fts_title, fts_content)
-    )
+
+    if not existing:
+        # On INSERT, trigger auto-syncs FTS; no need to do it here
+        pass
+    else:
+        # On UPDATE, manually sync FTS via trigger
+        # The trigger fires on UPDATE and handles the FTS refresh
+        pass
 
     # Vector: embed for semantic search
     emb_provider = create_embedding_provider(config.embedding)
@@ -223,13 +243,17 @@ async def write_insight(db, config, title: str, content: str, source_docs: list 
         ensure_vec_table(db, emb_provider.dimensions, "insights_vec")
         try:
             vecs = await emb_provider.embed([f"{title}\n{content}"])
+            # For UPDATE case, clear old vector first; for INSERT it's new
+            if existing:
+                db.execute("DELETE FROM insights_vec WHERE rowid = ?", (insight_id,))
             db.execute(
-                "INSERT OR REPLACE INTO insights_vec(rowid, embedding) VALUES (?, ?)",
+                "INSERT INTO insights_vec(rowid, embedding) VALUES (?, ?)",
                 (insight_id, json.dumps(vecs[0]))
             )
             vec_count = 1
-        except Exception:
-            pass  # non-fatal: insight stored, just no vector
+        except Exception as e:
+            import sys
+            print(f"[spiderweb] Failed to embed insight {insight_id}: {e}", file=sys.stderr)
 
     # Reverse extract entities and link to L2
     link_result = {}

@@ -1,6 +1,7 @@
 """graph_build — orchestrate entity/relation extraction from docs."""
 import json
 import math
+import sqlite3
 
 from ..providers import LLMProvider, create_llm_provider
 from ..domain import DomainConfig
@@ -97,15 +98,17 @@ async def build_graph(
         weight = rel_info.get("weight", 1.0) if isinstance(rel_info, dict) else 1.0
 
         try:
-            db.execute(
+            cur = db.execute(
                 "INSERT OR IGNORE INTO relations (entity_a, entity_b, relation_type, weight) "
                 "VALUES (?, ?, ?, ?)",
                 (a, b, rtype, weight)
             )
-            if db.total_changes > 0:
-                rel_added += 1
-        except Exception:
-            continue
+            rel_added += cur.rowcount
+        except sqlite3.IntegrityError:
+            pass  # Unique constraint violation (expected for duplicates)
+        except Exception as e:
+            import sys
+            print(f"[spiderweb] Failed to insert relation {a}-{b}: {e}", file=sys.stderr)
 
     db.commit()
 

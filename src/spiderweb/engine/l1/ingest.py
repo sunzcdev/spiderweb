@@ -62,34 +62,42 @@ def _extract_title(text: str) -> str | None:
 
 
 def _chunk_markdown(text: str) -> list[Chunk]:
-    """Chunk markdown by ## and ### headings."""
+    """Chunk markdown by ## and ### headings. Level 2 (##) is primary; level 3 (###) subdivides further."""
     chunks = []
-    sections = re.split(r"\n(?=## )", text)
+
+    # Split by ## (level 2)
+    sections = re.split(r"\n(?=##\s)", text)
     line_offset = 0
 
     for section in sections:
-        lines = section.split("\n")
-        heading_match = re.match(r"^(#{2,3})\s+(.+)", lines[0]) if lines else None
-        if heading_match:
-            level = len(heading_match.group(1))  # 2 for ##, 3 for ###
-            section_path = heading_match.group(2).strip()
-            body = "\n".join(lines[1:]).strip()
-        else:
-            level = 0
-            section_path = ""
-            body = section.strip()
+        # Split each level-2 section by ### (level 3)
+        subsections = re.split(r"\n(?=###\s)", section)
 
-        if not body:
+        for subsec_idx, subsection in enumerate(subsections):
+            lines = subsection.split("\n")
+            heading_match = re.match(r"^(#{2,3})\s+(.+)", lines[0]) if lines else None
+
+            if heading_match:
+                level = len(heading_match.group(1))  # 2 for ##, 3 for ###
+                section_path = heading_match.group(2).strip()
+                body = "\n".join(lines[1:]).strip()
+            else:
+                # No heading on first line; infer from position
+                level = 3 if subsec_idx > 0 else 2  # First subsection is ##, rest are ###
+                section_path = ""
+                body = subsection.strip()
+
+            if not body:
+                line_offset += len(lines)
+                continue
+
+            chunks.append(Chunk(
+                section_path=section_path,
+                heading_level=level,
+                body=body,
+                line_start=line_offset,
+            ))
             line_offset += len(lines)
-            continue
-
-        chunks.append(Chunk(
-            section_path=section_path,
-            heading_level=level,
-            body=body,
-            line_start=line_offset,
-        ))
-        line_offset += len(lines)
 
     return chunks
 

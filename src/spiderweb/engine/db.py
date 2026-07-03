@@ -20,13 +20,30 @@ CREATE TABLE IF NOT EXISTS chunks (
     section_path TEXT DEFAULT '',
     heading_level INTEGER DEFAULT 0,
     body TEXT NOT NULL,
-    line_start INTEGER DEFAULT 0
+    line_start INTEGER DEFAULT 0,
+    UNIQUE(doc_id, section_path)
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     body,
+    content='chunks',
+    content_rowid='id',
     tokenize='unicode61'
 );
+
+-- Triggers to keep chunks_fts in sync with chunks
+CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+  INSERT INTO chunks_fts(rowid, body) VALUES (new.id, new.body);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+  INSERT INTO chunks_fts(chunks_fts, rowid, body) VALUES('delete', old.id, old.body);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+  INSERT INTO chunks_fts(chunks_fts, rowid, body) VALUES('delete', old.id, old.body);
+  INSERT INTO chunks_fts(rowid, body) VALUES (new.id, new.body);
+END;
 
 CREATE TABLE IF NOT EXISTS entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,8 +89,24 @@ CREATE TABLE IF NOT EXISTS insights (
 CREATE VIRTUAL TABLE IF NOT EXISTS insights_fts USING fts5(
     title,
     content,
+    content='insights',
+    content_rowid='id',
     tokenize='unicode61'
 );
+
+-- Triggers to keep insights_fts in sync with insights
+CREATE TRIGGER IF NOT EXISTS insights_ai AFTER INSERT ON insights BEGIN
+  INSERT INTO insights_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS insights_ad AFTER DELETE ON insights BEGIN
+  INSERT INTO insights_fts(insights_fts, rowid, title, content) VALUES('delete', old.id, old.title, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS insights_au AFTER UPDATE ON insights BEGIN
+  INSERT INTO insights_fts(insights_fts, rowid, title, content) VALUES('delete', old.id, old.title, old.content);
+  INSERT INTO insights_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+END;
 
 CREATE TABLE IF NOT EXISTS query_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,34 +155,35 @@ _conn = None
 
 
 def get_db(db_path: str) -> _NoClose:
-    """Get or create the shared database connection."""
+    """Get or create the shared database connection.
+
+    This function relies on SQLite's native WAL recovery mechanism.
+    WAL files are never manually deleted — SQLite handles them correctly
+    on connection open. We only need to ensure integrity after recovery.
+    """
     global _conn
     if _conn is not None:
         return _conn
 
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    dir_path = os.path.dirname(db_path) or "."
+    os.makedirs(dir_path, exist_ok=True)
 
-    # Auto-recover from crashed process: clean stale WAL files
-    wal_path = db_path + "-wal"
-    shm_path = db_path + "-shm"
-    if os.path.exists(wal_path) or os.path.exists(shm_path):
-        db_mtime = os.path.getmtime(db_path) if os.path.exists(db_path) else 0
-        wal_mtime = max(
-            os.path.getmtime(wal_path) if os.path.exists(wal_path) else 0,
-            os.path.getmtime(shm_path) if os.path.exists(shm_path) else 0,
-        )
-        # If WAL is > 120s newer than DB, the last write crashed — clean up
-        if wal_mtime - db_mtime > 120:
-            for p in [wal_path, shm_path]:
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-
+    # Let SQLite handle WAL recovery on open (it does this correctly)
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA wal_autocheckpoint=500")  # ~2MB before auto-checkpoint
     conn.execute("PRAGMA foreign_keys=ON")
+
+    # After open, perform checkpoint and integrity check to ensure clean state
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        integrity_result = conn.execute("PRAGMA integrity_check").fetchone()
+        if integrity_result and integrity_result[0] != "ok":
+            raise RuntimeError(f"Database integrity check failed: {integrity_result[0]}")
+    except sqlite3.DatabaseError as e:
+        conn.close()
+        raise RuntimeError(f"Failed to verify database integrity: {e}") from e
+
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)

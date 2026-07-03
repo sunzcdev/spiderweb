@@ -1,4 +1,5 @@
 """Provider interfaces — LLM, embedding, tokenizer, reranker."""
+import asyncio
 import os
 import sys
 from abc import ABC, abstractmethod
@@ -101,9 +102,14 @@ class VoyageEmbedding(EmbeddingProvider):
     async def embed(self, texts: list[str]) -> list[list[float]]:
         import voyageai
         key = self.api_key or os.environ.get("SPIDERWEB_EMBEDDING_API_KEY", "") or os.environ.get("VOYAGE_API_KEY", "")
-        vo = voyageai.Client(api_key=key)
-        result = vo.embed(texts, model=self.model, input_type="document")
-        return result.embeddings
+
+        def _embed_sync():
+            vo = voyageai.Client(api_key=key)
+            result = vo.embed(texts, model=self.model, input_type="document")
+            return result.embeddings
+
+        # Run blocking I/O in thread pool to avoid blocking event loop
+        return await asyncio.to_thread(_embed_sync)
 
     @property
     def dimensions(self) -> int:
@@ -121,8 +127,19 @@ class NoopEmbedding(EmbeddingProvider):
         return 0
 
 
+@dataclass
+class MockLLM(LLMProvider):
+    """Mock LLM provider for testing — returns canned responses."""
+    responses: dict = field(default_factory=lambda: {"chat": "mock response"})
+
+    async def chat(self, messages: list[dict], **kwargs) -> str:
+        return self.responses.get("chat", "mock response")
+
+
 def create_llm_provider(config: dict) -> LLMProvider:
     driver = config.get("driver", "openai")
+    if driver == "mock":
+        return MockLLM(responses=config.get("responses", {}))
     if driver == "openai":
         return OpenAILLM(
             model=config.get("model", "deepseek-chat"),
@@ -171,9 +188,14 @@ class VoyageReranker(RerankerProvider):
     async def rerank(self, query: str, documents: list[str], top_n: int) -> list[tuple[int, float]]:
         import voyageai
         key = self.api_key or os.environ.get("SPIDERWEB_EMBEDDING_API_KEY", "") or os.environ.get("VOYAGE_API_KEY", "")
-        vo = voyageai.Client(api_key=key)
-        result = vo.rerank(query=query, documents=documents, model=self.model, top_k=top_n)
-        return [(r.index, r.relevance_score) for r in result.results]
+
+        def _rerank_sync():
+            vo = voyageai.Client(api_key=key)
+            result = vo.rerank(query=query, documents=documents, model=self.model, top_k=top_n)
+            return [(r.index, r.relevance_score) for r in result.results]
+
+        # Run blocking I/O in thread pool to avoid blocking event loop
+        return await asyncio.to_thread(_rerank_sync)
 
 
 def create_reranker_provider(config: dict) -> RerankerProvider | None:
