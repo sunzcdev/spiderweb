@@ -197,7 +197,9 @@ async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int],
 
     # Token limit: voyage-4-large max 120K input tokens per batch.
     # Chinese: 1 token ≈ 1.5-2 chars. Safe limit: 80K chars ≈ 50K tokens.
+    # Per-text limit: voyage-4-large ~32K tokens ≈ ~55K chars. Safe: 30K chars.
     MAX_CHARS_PER_BATCH = 80_000
+    MAX_CHARS_PER_TEXT = 30_000  # Safety truncation for individual oversized chunks
 
     batch_size = 32
     for i in range(0, len(chunk_ids), batch_size):
@@ -210,6 +212,9 @@ async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int],
         sub_batches = []
         current_ids, current_texts, current_chars = [], [], 0
         for rid, text in id_text_pairs:
+            # Truncate individual oversized texts to stay under voyage per-text limit
+            if len(text) > MAX_CHARS_PER_TEXT:
+                text = text[:MAX_CHARS_PER_TEXT]
             text_len = len(text)
             if current_chars + text_len > MAX_CHARS_PER_BATCH and current_texts:
                 sub_batches.append((current_ids, current_texts))
