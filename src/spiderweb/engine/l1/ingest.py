@@ -62,42 +62,36 @@ def _extract_title(text: str) -> str | None:
 
 
 def _chunk_markdown(text: str) -> list[Chunk]:
-    """Chunk markdown by ## and ### headings. Level 2 (##) is primary; level 3 (###) subdivides further."""
+    """Chunk markdown by #, ##, ### headings. Each heading splits into its own chunk."""
     chunks = []
-
-    # Split by ## (level 2)
-    sections = re.split(r"\n(?=##\s)", text)
+    # Split on any ATX heading (#, ##, ###) at start of a line
+    sections = re.split(r"\n(?=#{1,3}\s)", text)
     line_offset = 0
 
     for section in sections:
-        # Split each level-2 section by ### (level 3)
-        subsections = re.split(r"\n(?=###\s)", section)
+        lines = section.split("\n")
+        heading_match = re.match(r"^(#{1,3})\s+(.+)", lines[0]) if lines else None
 
-        for subsec_idx, subsection in enumerate(subsections):
-            lines = subsection.split("\n")
-            heading_match = re.match(r"^(#{2,3})\s+(.+)", lines[0]) if lines else None
+        if heading_match:
+            level = len(heading_match.group(1))  # 1 for #, 2 for ##, 3 for ###
+            section_path = heading_match.group(2).strip()
+            body = "\n".join(lines[1:]).strip()
+        else:
+            level = 0
+            section_path = ""
+            body = section.strip()
 
-            if heading_match:
-                level = len(heading_match.group(1))  # 2 for ##, 3 for ###
-                section_path = heading_match.group(2).strip()
-                body = "\n".join(lines[1:]).strip()
-            else:
-                # No heading on first line; infer from position
-                level = 3 if subsec_idx > 0 else 2  # First subsection is ##, rest are ###
-                section_path = ""
-                body = subsection.strip()
-
-            if not body:
-                line_offset += len(lines)
-                continue
-
-            chunks.append(Chunk(
-                section_path=section_path,
-                heading_level=level,
-                body=body,
-                line_start=line_offset,
-            ))
+        if not body:
             line_offset += len(lines)
+            continue
+
+        chunks.append(Chunk(
+            section_path=section_path,
+            heading_level=level,
+            body=body,
+            line_start=line_offset,
+        ))
+        line_offset += len(lines)
 
     return chunks
 
@@ -200,6 +194,7 @@ async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int],
     # Per-text limit: voyage-4-large ~32K tokens ≈ ~55K chars. Safe: 30K chars.
     MAX_CHARS_PER_BATCH = 80_000
     MAX_CHARS_PER_TEXT = 30_000  # Safety truncation for individual oversized chunks
+    MIN_CHARS_PER_TEXT = 10  # Skip empty/trivial chunks that poison voyage batches
 
     batch_size = 32
     for i in range(0, len(chunk_ids), batch_size):
@@ -215,6 +210,9 @@ async def index_vectors(db, provider: EmbeddingProvider, chunk_ids: list[int],
             # Truncate individual oversized texts to stay under voyage per-text limit
             if len(text) > MAX_CHARS_PER_TEXT:
                 text = text[:MAX_CHARS_PER_TEXT]
+            # Skip empty/trivial chunks that poison voyage batches
+            if len(text.strip()) < MIN_CHARS_PER_TEXT:
+                continue
             text_len = len(text)
             if current_chars + text_len > MAX_CHARS_PER_BATCH and current_texts:
                 sub_batches.append((current_ids, current_texts))

@@ -224,9 +224,10 @@ class ReadingService:
 
             if existing:
                 old_doc_id = existing[0]
-                # Delete old (cascade via FK)
+                # Delete chunks first (FK: chunks.doc_id → docs.id, no CASCADE)
+                db.execute("DELETE FROM chunks WHERE doc_id = ?", (old_doc_id,))
+                # Then delete doc (FTS & vec cleanup via triggers on chunks)
                 db.execute("DELETE FROM docs WHERE id = ?", (old_doc_id,))
-                # FTS & vec cleanup via triggers
 
             # Insert new doc
             cursor = db.execute(
