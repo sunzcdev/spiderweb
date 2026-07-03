@@ -45,6 +45,10 @@ def ingest_file(file_path: str, chunk_size: int = 1500, chunk_overlap: int = 150
     # Chunk after hooks (hooks may alter content)
     if suffix in (".epub", ".md"):
         chunks = _chunk_markdown(text)
+        # Fallback: if markdown chunker produced too few chunks for a large file
+        # (Pandoc EPUB→MD with few/no headings), use sliding window instead
+        if len(chunks) < 5 and len(text) > 100_000:
+            chunks = _chunk_sliding_window(text, chunk_size, chunk_overlap)
     else:
         chunks = _chunk_sliding_window(text, chunk_size, chunk_overlap)
 
@@ -111,7 +115,7 @@ def _chunk_sliding_window(text: str, chunk_size: int, overlap: int) -> list[Chun
         body = text[pos:end].strip()
         if body:
             chunks.append(Chunk(
-                section_path="",
+                section_path=f"chunk-{pos}",
                 heading_level=0,
                 body=body,
                 line_start=pos,
