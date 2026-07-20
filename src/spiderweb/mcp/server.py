@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import time
+import asyncio
 import argparse
 from pathlib import Path
 from mcp.server import Server
@@ -10,13 +11,17 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from ..engine.db import get_db, get_db_path
+from ..engine.maintain import MaintainService
 from ..debug import init as debug_init, tool_call as debug_call, tool_result as debug_result, tool_error as debug_error
+
 from ..engine.domain import load_domain, DomainConfig
 from ..service.reading_service import ReadingService
 
 server = Server("spiderweb")
 _config: DomainConfig = None
 _reading: ReadingService = None
+_maintain: MaintainService = None
+
 
 
 def get_config() -> DomainConfig:
@@ -59,7 +64,24 @@ async def list_tools():
              inputSchema={"type": "object", "properties": {
                  "source": {"type": "string", "description": "文件路径"},
              }, "required": ["source"]}),
+        Tool(name="study",
+             description="知识深度内化：通过注册实体、增强关联或添加备注来精修图谱。",
+             inputSchema={
+                 "type": "object",
+                 "properties": {
+                     "action": {"type": "string", "enum": ["entity", "link", "note"]},
+                     "name": {"type": "string", "description": "实体名 (用于 entity 动作)"},
+                     "type": {"type": "string", "description": "实体类型 (用于 entity 动作)"},
+                     "book": {"type": "string", "description": "关联书名 (用于 entity 动作)"},
+                     "a": {"type": "string", "description": "实体A (用于 link/note 动作)"},
+                     "b": {"type": "string", "description": "实体B (用于 link/note 动作)"},
+                     "relation": {"type": "string", "description": "关系类型"},
+                     "content": {"type": "string", "description": "备注内容 (用于 note 动作)"}
+                 },
+                 "required": ["action"]
+             }),
     ]
+
 
 
 def _validate_and_sanitize_args(name: str, arguments: dict, config: DomainConfig) -> dict | None:
@@ -150,6 +172,31 @@ async def call_tool(name: str, arguments: dict, context=None):
                 )
             elif name == "ingest":
                 result = await _reading.ingest(arguments["source"])
+            elif name == "study":
+                action = arguments["action"]
+                if action == "entity":
+                    result = _maintain.register(
+                        arguments["name"],
+                        arguments["type"],
+                        book=arguments.get("book"),
+                        target_entity=arguments.get("b"),
+                        relation_type=arguments.get("relation", "MENTIONS"),
+                    )
+                elif action == "link":
+                    result = _maintain.connect(
+                        arguments["a"],
+                        arguments["b"],
+                        arguments["relation"],
+                    )
+                elif action == "note":
+                    result = _maintain.annotate(
+                        arguments["a"],
+                        arguments["b"],
+                        arguments["content"],
+                        arguments.get("relation"),
+                    )
+                else:
+                    result = {"error": f"Unknown action: {action}", "error_type": "validation"}
             else:
                 result = {"error": f"Unknown tool: {name}", "error_type": "tool_error"}
 
@@ -207,8 +254,17 @@ async def main(domain_path: str | None = None):
     # Initialize ReadingService
     db_path = get_db_path(_config.data_dir)
     db = get_db(db_path)
-    global _reading
+    global _reading, _maintain
     _reading = ReadingService(db, _config)
+    _maintain = MaintainService(db_path, _config)
+
+    # Startup sync: reconcile insights/*.md changes (e.g. Obsidian edits) into DB
+    try:
+        sync_result = await asyncio.wait_for(_reading.sync_insights(), timeout=60)
+        if sync_result.get("added") or sync_result.get("updated"):
+            sys.stderr.write(f"[spiderweb] insights sync: {sync_result}\n")
+    except Exception:
+        pass  # non-critical; insights file is the truth
 
     try:
         async with stdio_server() as (reader, writer):

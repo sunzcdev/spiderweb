@@ -1,6 +1,7 @@
 chunk_overlap: 150
 chunk_size: 1500
 data_dir: ~/.spiderweb/reading
+insights_dir: ~/notebooks/wiki/reading-graph/raw/insights
 extraction:
   mode: sample
   sample_rate: 0.3
@@ -11,6 +12,7 @@ providers:
     model: voyage-4-large
   llm:
     base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
     driver: openai
     model: deepseek-v4-flash
     fallback:

@@ -108,7 +108,7 @@ class TestInsightWrite:
 
         result = await write_insight(temp_db, config, "测试笔记", "这是一条测试内容。")
         assert result["ok"] is True
-        assert result["slug"] == "测试笔记"
+        assert result["slug"] == "测试笔记-aa108c13"
 
 
 class TestReadingService:

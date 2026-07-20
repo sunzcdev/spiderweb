@@ -17,6 +17,7 @@ class DomainConfig:
 
     # Runtime config
     data_dir: str = ""
+    insights_dir: str = ""  # if empty, defaults to {data_dir}/insights
     chunk_size: int = 1500
     chunk_overlap: int = 150
     extraction_mode: str = "sample"  # full | sample
@@ -65,6 +66,7 @@ def load_domain(domain_path: str) -> DomainConfig:
         with open(config_yaml) as f:
             raw = yaml.safe_load(f) or {}
         config.data_dir = os.path.expanduser(raw.get("data_dir", f"~/.spiderweb/{config.name}"))
+        config.insights_dir = os.path.expanduser(raw.get("insights_dir", "")) if raw.get("insights_dir") else ""
         config.chunk_size = raw.get("chunk_size", 1500)
         config.chunk_overlap = raw.get("chunk_overlap", 150)
         config.extraction_mode = raw.get("extraction", {}).get("mode", "sample")

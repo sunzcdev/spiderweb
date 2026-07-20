@@ -5,6 +5,8 @@ the spiderweb L1/L2/L3 engine. Designed to be imported by server.py
 and exposed as 4 MCP tools.
 """
 import asyncio
+import json
+import math
 from dataclasses import dataclass, field
 
 from spiderweb.engine.domain import DomainConfig
@@ -13,10 +15,10 @@ from spiderweb.engine.providers import (
     create_tokenizer_provider, create_reranker_provider,
     LLMProvider,
 )
-from spiderweb.engine.l1.ingest import ingest_file, index_vectors, hybrid_search, ensure_vec_table
+from spiderweb.engine.l1.ingest import ingest_file, index_vectors, hybrid_search
 from spiderweb.engine.l2.build import build_graph
 from spiderweb.engine.l2.search import search_entities, graph_stats
-from spiderweb.engine.l3.insight import write_insight
+from spiderweb.engine.l3.insight import write_insight, sync_insights as _sync_insights
 
 
 @dataclass
@@ -26,6 +28,7 @@ class ReadingService:
     Usage:
         service = ReadingService(db, config)
         await service.think("妾")
+        await service.think("稀缺性", mode="deep")  # 深邃研究
         await service.read("知行合一", source="传习录")
         await service.record("知行合一很重要", source="传习录")
         await service.ingest("/path/to/book.epub")
@@ -44,12 +47,22 @@ class ReadingService:
     # Public API — think · read · record · ingest
     # ═══════════════════════════════════════════════════════════════
 
-    async def think(self, anchor: str) -> dict:
-        """探索概念关联网络。锚点→深度展开→热点停止。"""
+    async def think(self, anchor: str, mode: str = "divergent",
+                    max_depth: int | None = None, book: str | None = None) -> dict:
+        """探索概念关联网络。两种认知模式：
+
+        - divergent（发散）：横向扫描，发现意外连接。广度优先 + 软主题约束。返回 depths。
+        - deep（深邃研究）：纵向深钻，理解结构。收敛 DFS + 硬主题约束。返回 chain。
+
+        Parameters:
+            anchor: 概念锚点
+            mode: "divergent" | "deep"
+            max_depth: 最大跳数（deep 默认 10，divergent 默认 6）
+            book: 可选，限定在某本书内思考
+        """
         # ── 1. 找锚点 ──────────────────────────────────────────
         entity = self._find_anchor(anchor)
         if entity is None:
-            # 搜候选：只返回名字包含锚点 or 别名包含锚点的（比 search_entities 的 LIKE 更收敛）
             candidates = []
             seen_names = set()
             for e in search_entities(self.db, anchor):
@@ -63,28 +76,42 @@ class ReadingService:
                 }
             return {"anchor": anchor, "found": False, "candidates": []}
 
-        # ── 2. 深度展开 ─────────────────────────────────────────
-        # 预加载所有关系的权重范围（用于归一化）
+        # ── 2. 按模式分发 ─────────────────────────────────────
+        if mode == "deep":
+            return await self._think_deep(entity, max_depth if max_depth is not None else 10, book)
+        return await self._think_divergent(entity, max_depth if max_depth is not None else 6, book)
+
+    async def _think_divergent(self, entity: dict, max_depth: int = 6, book: str | None = None) -> dict:
+        """发散模式：BFS + 话题相干性约束 + 热点停止。"""
+        # 建立话题框架
+        context = self._resolve_topic_context(entity["name"], entity["type"], book)
+
+        # 权重归一化
         max_w = self.db.execute("SELECT COALESCE(MAX(weight), 1.0) FROM relations").fetchone()[0]
         max_w = max(max_w, 1.0)
 
         depths, seen = {}, {entity["name"]}
-        frontier = [entity["name"]]  # 当前层的节点
+        frontier = [entity["name"]]
         depth = 1
+        threshold = 0.3 if context["doc_ids"] else 0.2
 
-        while frontier and depth <= self._max_depth:
-            # 收集当前层所有邻居
+        while frontier and depth <= max_depth:
             all_neighbors = []
             for ent in frontier:
                 all_neighbors.extend(self._get_neighbors(ent))
 
-            # 去重
             unique = {}
             for n in all_neighbors:
                 if n["name"] in seen:
                     continue
                 seen.add(n["name"])
-                # 锚点关系强度 = 归一化权重，随深度衰减
+
+                # 话题相干性过滤
+                coherence = self._topic_coherence(n, context, depth)
+                if coherence < threshold:
+                    continue
+
+                n["coherence"] = round(coherence, 3)
                 rel = min(n["weight"] / max_w, 1.0) * (0.5 ** (depth - 1))
                 fp = self._footprint_score(n["name"])
                 cb = min(n["cross_doc_count"] / 50, 1.0)
@@ -94,15 +121,15 @@ class ReadingService:
             if not unique:
                 break
 
-            # 取 top 3
             top3 = sorted(unique.values(), key=lambda x: x["_score"], reverse=True)[:3]
             depths[str(depth)] = [
                 {"name": n["name"], "type": n["type"],
-                 "relation": n["relation"], "in_books": n["cross_doc_count"]}
+                 "relation": n["relation"], "in_books": n["cross_doc_count"],
+                 "coherence": n["coherence"]}
                 for n in top3
             ]
 
-            # 检查热点：任一 top3 节点是"熟路"即可停
+            # 热点停止
             if any(self._is_hot(n["name"]) for n in top3):
                 break
 
@@ -110,6 +137,69 @@ class ReadingService:
             depth += 1
 
         return {"anchor": entity["name"], "found": True, "depths": depths}
+
+    async def _think_deep(self, entity: dict, max_depth: int = 10, book: str | None = None) -> dict:
+        """深邃研究模式：收敛 DFS + 硬主题约束。
+
+        每跳取 coherence 最高的 1 个节点继续，直到没有节点能通过阈值。
+        返回一条论证链（不带 rationale 文本，供后续生成）。
+        """
+        context = self._resolve_topic_context(entity["name"], entity["type"], book)
+        threshold = 0.6 if context["doc_ids"] else 0.4
+
+        chain = [{
+            "entity": entity["name"],
+            "type": entity["type"],
+            "depth": 0,
+            "coherence": 1.0,
+            "relation": None,
+        }]
+        seen = {entity["name"]}
+        frontier = entity["name"]
+
+        for depth in range(1, max_depth + 1):
+            neighbors = self._get_neighbors(frontier)
+
+            scored = []
+            for n in neighbors:
+                if n["name"] in seen:
+                    continue
+                coherence = self._topic_coherence(n, context, depth)
+                if coherence < threshold:
+                    continue
+                scored.append((coherence, n))
+
+            if not scored:
+                return {
+                    "anchor": entity["name"],
+                    "found": True,
+                    "mode": "deep",
+                    "chain": chain,
+                    "converged_at": depth - 1,
+                    "converged_reason": "no_neighbors_above_threshold",
+                }
+
+            # 取 coherence 最高的 1 条路径
+            scored.sort(key=lambda x: -x[0])
+            coherence, best = scored[0]
+            seen.add(best["name"])
+            chain.append({
+                "entity": best["name"],
+                "type": best["type"],
+                "depth": depth,
+                "coherence": round(coherence, 3),
+                "relation": best["relation"],
+            })
+            frontier = best["name"]
+
+        return {
+            "anchor": entity["name"],
+            "found": True,
+            "mode": "deep",
+            "chain": chain,
+            "converged_at": max_depth,
+            "converged_reason": "max_depth_reached",
+        }
 
     async def read(self, query: str, source: str | None = None, top_n: int = 3) -> dict:
         """阅读原文段落。返回完整段落+出处。"""
@@ -182,17 +272,16 @@ class ReadingService:
         if not content or not content.strip():
             return {"ok": False, "error": "content is empty"}
 
-        # Generate unique title+slug to avoid collisions
         title = content[:50].strip().split("\n")[0]
-
-        # Append content hash to slug to prevent collisions
-        import hashlib
-        content_hash = hashlib.md5(content.encode()).hexdigest()[:8]
-        slug_base = title.lower()[:60]  # Leave room for hash
-        title_with_hash = f"{title} #{content_hash}"  # Display-friendly version
-
         source_docs = [source] if source else []
-        return await write_insight(self.db, self.config, title_with_hash, content, source_docs)
+        return await write_insight(self.db, self.config, title, content, source_docs)
+
+    async def sync_insights(self) -> dict:
+        """Scan insights/*.md, re-index changed/new files into DB.
+
+        Idempotent. Uses file mtime vs DB updated_at to skip unchanged files.
+        """
+        return await _sync_insights(self.db, self.config)
 
     async def ingest(self, source: str) -> dict:
         """收录新书。解析、分块、索引、建图，同步等到底。"""
@@ -324,7 +413,7 @@ class ReadingService:
         return None  # caller 用 search_entities 查候选列表
 
     def _get_neighbors(self, entity_name: str) -> list[dict]:
-        """获取实体的所有邻接节点。"""
+        """获取实体的所有邻接节点（含来源文档和描述）。"""
         rows = self.db.execute(
             "SELECT entity_a, entity_b, relation_type, weight "
             "FROM relations WHERE entity_a = ? OR entity_b = ?",
@@ -334,7 +423,8 @@ class ReadingService:
         for a, b, rtype, weight in rows:
             neighbor = b if a == entity_name else a
             row = self.db.execute(
-                "SELECT entity_type, cross_doc_count FROM entities WHERE canonical_name = ?",
+                "SELECT entity_type, cross_doc_count, source_docs_json, description "
+                "FROM entities WHERE canonical_name = ?",
                 (neighbor,)
             ).fetchone()
             neighbors.append({
@@ -343,8 +433,91 @@ class ReadingService:
                 "relation": rtype,
                 "weight": weight,
                 "cross_doc_count": row[1] if row else 0,
+                "source_docs": json.loads(row[2] or "[]") if row and row[2] else [],
+                "description": row[3] if row else "",
             })
         return neighbors
+
+    # ── 话题相干性系统 ─────────────────────────────────────────
+
+    def _resolve_topic_context(self, anchor_name: str, anchor_type: str,
+                               book: str | None = None) -> dict:
+        """建立话题框架：锚点来源文档、根类型、衰减率。
+
+        如果指定了 book，则以该书为唯一语境；否则从锚点的 source_docs_json 推断。
+        """
+        doc_ids = []
+        if book:
+            # 指定了书 → 限定在该书内思考
+            row = self.db.execute("SELECT id FROM docs WHERE title = ?", (book,)).fetchone()
+            if row:
+                doc_ids = [row[0]]
+        else:
+            # 从实体来源文档推断
+            row = self.db.execute(
+                "SELECT source_docs_json FROM entities WHERE canonical_name = ?",
+                (anchor_name,)
+            ).fetchone()
+            if row and row[0]:
+                parsed = json.loads(row[0])
+                if parsed:
+                    doc_ids = [int(d) for d in parsed]
+
+        return {
+            "anchor_name": anchor_name,
+            "anchor_type": anchor_type,
+            "root_type": anchor_type.split(".")[0] if "." in anchor_type else anchor_type,
+            "doc_ids": doc_ids,
+            "decay_rate": 2.0,
+        }
+
+    def _type_compat(self, anchor_type: str, candidate_type: str) -> float:
+        """计算两个实体类型的语义兼容度。
+
+        同完全一致 → 1.0
+        同根类型（如 concept.doctrine vs concept） → 0.7
+        不同根类型 → 0.2
+        """
+        if not candidate_type or candidate_type == "unknown":
+            return 0.2
+        if anchor_type == candidate_type:
+            return 1.0
+        anchor_root = anchor_type.split(".")[0]
+        candidate_root = candidate_type.split(".")[0]
+        if candidate_root == "stem_branch" or candidate_root == "element":
+            return 0.1  # 干支五行与经济/哲学概念强相关惩罚
+        return 0.7 if anchor_root == candidate_root else 0.2
+
+    def _topic_coherence(self, neighbor: dict, context: dict, depth: int) -> float:
+        """计算候选实体与话题框架的相干性。
+
+        三信号合成：来源文档重叠 × 0.5 + 类型兼容性 × 0.3 + 深度衰减 × 0.2
+        当话题框架没有 doc_ids（无书语境），重新分配权重：
+          类型兼容性 × 0.6 + 深度衰减 × 0.4
+        """
+        doc_ids = context["doc_ids"]
+
+        # 信号 1：来源文档重叠
+        doc_overlap = 0.0
+        if doc_ids and neighbor.get("source_docs"):
+            shared = set(str(d) for d in doc_ids) & set(str(d) for d in neighbor["source_docs"])
+            doc_overlap = len(shared) / max(len(doc_ids), 1)
+
+        # 信号 2：类型兼容性
+        type_compat = self._type_compat(
+            context["anchor_type"],
+            neighbor.get("type", "unknown"),
+        )
+
+        # 信号 3：深度衰减
+        depth_decay = math.exp(-depth / context.get("decay_rate", 2.0))
+
+        if doc_ids:
+            # 有明确的书语境 → 全权重（即使 doc_overlap 为 0 也会压低跨书实体）
+            return doc_overlap * 0.5 + type_compat * 0.3 + depth_decay * 0.2
+        else:
+            # 无书语境 → 依赖类型 + 深度
+            return type_compat * 0.6 + depth_decay * 0.4
 
     def _footprint_score(self, entity_name: str) -> float:
         """足迹加权得分。record×3, navigate×2, search×1，归一化到 [0,1]。"""

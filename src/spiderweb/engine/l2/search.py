@@ -20,7 +20,7 @@ def search_entities(db, query: str, entity_type: str = "") -> list[dict]:
 def entity_get(db, name: str) -> dict | None:
     """Get entity detail: type, aliases, relations, insights, books, footprint."""
     row = db.execute(
-        "SELECT canonical_name, entity_type, aliases_json, description, source, cross_doc_count "
+        "SELECT canonical_name, entity_type, aliases_json, description, source, cross_doc_count, source_docs_json "
         "FROM entities WHERE canonical_name = ?", (name.strip(),)
     ).fetchone()
     if not row:
@@ -50,12 +50,23 @@ def entity_get(db, name: str) -> dict | None:
     ).fetchall()
     footprint = [{"source": t[0], "count": t[1], "last_seen": t[2]} for t in trace]
 
-    # Books this entity appears in
-    books = db.execute(
-        "SELECT DISTINCT d.title FROM chunks c JOIN docs d ON c.doc_id = d.id "
-        "WHERE c.body LIKE ? LIMIT 10", (f"%{name}%",)
-    ).fetchall()
-    book_list = [b[0] for b in books]
+    # Books this entity is known from — primary: source_docs_json
+    source_docs = json.loads(row[6] or "[]")
+    book_list = []
+    if source_docs:
+        placeholders = ",".join("?" * len(source_docs))
+        books = db.execute(
+            f"SELECT DISTINCT title FROM docs WHERE id IN ({placeholders}) LIMIT 10",
+            [int(d) for d in source_docs]
+        ).fetchall()
+        book_list = [b[0] for b in books]
+    if not book_list:
+        # Fallback: LIKE matching on chunk bodies (legacy entities)
+        books = db.execute(
+            "SELECT DISTINCT d.title FROM chunks c JOIN docs d ON c.doc_id = d.id "
+            "WHERE c.body LIKE ? LIMIT 10", (f"%{name}%",)
+        ).fetchall()
+        book_list = [b[0] for b in books]
 
     return {
         "name": row[0], "type": row[1],

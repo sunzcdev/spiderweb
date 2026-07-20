@@ -23,9 +23,29 @@ def _migration(name: str, description: str):
     return decorator
 
 
-# ──────────────────────────────────────────────
-# Migrations
-# ──────────────────────────────────────────────
+@_migration("add_relations_metadata", "Add metadata column to relations table")
+def _add_relations_metadata(db) -> bool:
+    cursor = db.execute("PRAGMA table_info(relations)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "metadata" not in columns:
+        db.execute("ALTER TABLE relations ADD COLUMN metadata TEXT DEFAULT '{}'")
+        return True
+    return False
+
+
+@_migration("add_entity_timestamps", "Add created_at and last_accessed_at to entities")
+def _add_entity_timestamps(db) -> bool:
+    cursor = db.execute("PRAGMA table_info(entities)")
+    columns = [row[1] for row in cursor.fetchall()]
+    changed = False
+    if "created_at" not in columns:
+        db.execute("ALTER TABLE entities ADD COLUMN created_at TEXT DEFAULT ''")
+        changed = True
+    if "last_accessed_at" not in columns:
+        db.execute("ALTER TABLE entities ADD COLUMN last_accessed_at TEXT DEFAULT ''")
+        changed = True
+    return changed
+
 
 @_migration("drop_entity_summaries", "Remove deprecated entity_summaries table")
 def _drop_entity_summaries(db) -> bool:
@@ -126,6 +146,18 @@ def _rebuild_fts_external_content(db) -> bool:
     db.execute("INSERT INTO insights_fts(rowid, title, content) SELECT id, title, content FROM insights")
 
     return True
+
+
+@_migration("add_entity_source_docs", "Add source_docs_json column for explicit book binding")
+def _add_entity_source_docs(db) -> bool:
+    """Add source_docs_json column to entities so extracted entities are
+    explicitly linked to their source books, not just via LIKE matching."""
+    cursor = db.execute("PRAGMA table_info(entities)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "source_docs_json" not in columns:
+        db.execute("ALTER TABLE entities ADD COLUMN source_docs_json TEXT DEFAULT '[]'")
+        return True
+    return False
 
 
 @_migration("add_chunks_unique_index", "Add unique index on chunks(doc_id, section_path)")

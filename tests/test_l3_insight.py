@@ -122,3 +122,66 @@ class TestLinkToEntities:
             "SELECT COUNT(*) FROM relations WHERE relation_type = 'MENTIONS'"
         ).fetchone()[0]
         assert count >= 2  # insight→entity edges + co-occurrence
+
+
+class TestFileInsights:
+    """L3 insight as Markdown file — read/write/sync."""
+
+    def test_write_and_read_md_roundtrip(self):
+        """Write an insight as .md, read it back, verify all fields."""
+        from spiderweb.engine.l3.insight import _write_md, _read_md
+        import tempfile, os
+
+        d = tempfile.mkdtemp()
+        try:
+            f = os.path.join(d, "my-insight-hash1234.md")
+            _write_md(f, "my-insight-hash1234", "测试标题",
+                       "这是心得正文", ["三体"], ["黑暗森林"])
+
+            parsed = _read_md(f)
+            assert parsed is not None
+            assert parsed["slug"] == "my-insight-hash1234"
+            assert parsed["title"] == "测试标题"
+            assert parsed["content"] == "这是心得正文"
+            assert parsed["source_docs"] == ["三体"]
+            assert parsed["entities"] == ["黑暗森林"]
+            assert parsed["file_mtime"] > 0
+        finally:
+            import shutil
+            shutil.rmtree(d)
+
+    def test_write_md_empty_lists(self):
+        """Write with no source_docs/entities → empty lists survive roundtrip."""
+        from spiderweb.engine.l3.insight import _write_md, _read_md
+        import tempfile, os
+
+        d = tempfile.mkdtemp()
+        try:
+            f = os.path.join(d, "plain.md")
+            _write_md(f, "plain", "无来源", "仅正文")
+            parsed = _read_md(f)
+            assert parsed["source_docs"] == []
+            assert parsed["entities"] == []
+        finally:
+            import shutil
+            shutil.rmtree(d)
+
+    def test_sync_insights_empty_dir(self):
+        """sync_insights on empty/non-existent dir returns error."""
+        import tempfile
+        from spiderweb.engine.l3.insight import sync_insights
+        from spiderweb.engine.domain import DomainConfig
+        import asyncio
+
+        d = tempfile.mkdtemp()
+        try:
+            cfg = DomainConfig(insights_dir=d + "/nonexistent")
+            # sync_insights needs a DB connection, but we can at least
+            # verify the not-found path returns an error dict
+            # (full sync test requires a real DB + providers)
+            result = asyncio.run(sync_insights(None, cfg))
+            assert result.get("ok") is False
+            assert "not found" in result.get("error", "")
+        finally:
+            import shutil
+            shutil.rmtree(d)

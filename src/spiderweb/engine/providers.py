@@ -66,7 +66,8 @@ class OpenAILLM(LLMProvider):
                 continue
             try:
                 timeout = httpx.Timeout(60.0, connect=15.0, read=60.0, write=60.0)
-                client = AsyncOpenAI(api_key=key, base_url=prov["base_url"], timeout=timeout)
+                http_client = httpx.AsyncClient(proxy=None, trust_env=False, timeout=timeout)
+                client = AsyncOpenAI(api_key=key, base_url=prov["base_url"], http_client=http_client)
                 api_kwargs = dict(
                     model=prov["model"],
                     messages=messages,

@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS entities (
     aliases_json TEXT DEFAULT '[]',
     description TEXT DEFAULT '',
     source TEXT DEFAULT 'auto',
-    cross_doc_count INTEGER DEFAULT 0
+    cross_doc_count INTEGER DEFAULT 0,
+    source_docs_json TEXT DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS relations (
@@ -136,6 +137,12 @@ class _NoClose:
     """Wrapper that makes close() a no-op — shared module-level connection."""
     def __init__(self, conn):
         self._conn = conn
+
+    def __enter__(self):
+        return self._conn.__enter__() or self
+
+    def __exit__(self, *args):
+        return self._conn.__exit__(*args)
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
